@@ -3,11 +3,14 @@ from typing import Any, Dict, List
 
 import pymongo.errors
 from bson import ObjectId
+from pymongo import UpdateOne
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from backend.db.base import BaseRepository
+from backend.db.created_write_compensation import delete_created_documents_cas
 from backend.db.errors import DuplicateKeyError, NotFoundError
-from backend.db.utils import to_object_id
+from backend.db.repositories.id_sequence_repository import id_sequence_repo
+from backend.db.utils import get_utc_now, to_object_id
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +25,7 @@ class FactionRepository(BaseRepository):
         novel_id: str | ObjectId,
         session: AsyncClientSession | None = None,
     ) -> str:
-        """查询该小说下当前最大 active faction_id，返回下一个可用值。
+        """通过原子序列预留下一个阵营业务 ID。
 
         Args:
             novel_id: 小说 ObjectId 或可转换字符串。
@@ -31,22 +34,14 @@ class FactionRepository(BaseRepository):
         Returns:
             下一个可用业务阵营 ID，格式为 fac_000001。
         """
-        obj_id = novel_id if isinstance(novel_id, ObjectId) else to_object_id(novel_id)
-        cursor = self.collection.find(
-            {"novel_id": obj_id, "is_deleted": False},
-            projection={"faction_id": 1},
+        allocated = await id_sequence_repo.allocate_many(
+            novel_id,
+            "faction",
+            "fac",
+            1,
             session=session,
-        ).sort("faction_id", -1).limit(1)
-        docs = await cursor.to_list(length=1)
-        if docs and docs[0].get("faction_id"):
-            # 仅解析标准 fac_000001 形式，非标准 ID 不阻塞后续自动编号。
-            current_id = docs[0]["faction_id"]
-            try:
-                num = int(current_id.split("_")[1])
-                return f"fac_{num + 1:06d}"
-            except (IndexError, ValueError):
-                pass
-        return "fac_000001"
+        )
+        return allocated[0]
 
     async def create_faction(
         self,
@@ -66,11 +61,12 @@ class FactionRepository(BaseRepository):
             raise ValueError("novel_id is required")
         if "faction_id" not in data or not data["faction_id"]:
             raise ValueError("faction_id is required")
-        if "name" not in data or not data["name"]:
+        if "name" not in data or not str(data["name"]).strip():
             raise ValueError("Faction name cannot be empty")
 
         prepared = dict(data)
         prepared["novel_id"] = to_object_id(prepared["novel_id"])
+        prepared["name"] = str(prepared["name"]).strip()
 
         prepared.setdefault("alias", [])
         prepared.setdefault("faction_type", "")
@@ -93,6 +89,10 @@ class FactionRepository(BaseRepository):
         prepared.setdefault("first_appearance_chapter_id", None)
         prepared.setdefault("sort_order", 0)
         prepared.setdefault("extra", {})
+        # 势力生命周期跨集合补偿使用内部版本做 CAS，不改变现有公开表单契约。
+        prepared.setdefault("version", 1)
+        # 势力作为依赖端点时，以严格整数 0 初始化贡献计数。
+        prepared.setdefault("dependency_guard_revision", 0)
 
         try:
             return await self.insert_one(prepared, session=session)
@@ -100,6 +100,29 @@ class FactionRepository(BaseRepository):
             raise DuplicateKeyError(
                 f"同一小说下 faction_id={prepared['faction_id']} 已存在，请使用其他阵营ID"
             )
+
+    async def delete_factions_created_exact(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        session: AsyncClientSession | None = None,
+    ) -> int:
+        """逐文档补偿仍停留在 v1 的本批新建势力。
+
+        Args:
+            documents: 带 Mongo `_id`、小说 ID、势力业务 ID 和版本的本批记录。
+            session: 可选 MongoDB 会话。
+
+        Returns:
+            实际安全删除的本批势力数量。
+        """
+        return await delete_created_documents_cas(
+            self.collection,
+            documents,
+            business_key_field="faction_id",
+            expected_dependency_guard_revision=0,
+            session=session,
+        )
 
     async def get_factions_by_novel(
         self,
@@ -322,14 +345,26 @@ class FactionRepository(BaseRepository):
             被实际修改的阵营数量。
         """
         obj_id = to_object_id(novel_id)
-        updates = (
-            (
-                {"novel_id": obj_id, "faction_id": fid},
-                {"sort_order": new_order},
+        # 排序也是主档并发写，必须推进内部版本，避免生命周期补偿覆盖刚完成的拖拽排序。
+        operations = [
+            UpdateOne(
+                {
+                    "novel_id": obj_id,
+                    "faction_id": faction_id,
+                    "is_deleted": False,
+                },
+                {
+                    "$set": {
+                        "sort_order": new_order,
+                        "updated_at": get_utc_now(),
+                    },
+                    "$inc": {"version": 1},
+                },
             )
-            for fid, new_order in sort_map.items()
-        )
-        return await self.bulk_update_one_set(updates, session=session)
+            for faction_id, new_order in sort_map.items()
+        ]
+        result = await self.bulk_write(operations, session=session)
+        return 0 if result is None else result.modified_count
 
     async def soft_delete_faction(
         self,

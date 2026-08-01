@@ -2,6 +2,7 @@
 
 import atexit
 import codecs
+import errno
 import locale
 import os
 import shlex
@@ -10,7 +11,6 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 import webbrowser
 from collections import deque
 from datetime import datetime
@@ -19,13 +19,24 @@ from typing import Literal, TextIO
 
 import customtkinter as ctk
 
+from backend.runtime import (
+    BACKEND_PORT_ENV_VAR,
+    DEFAULT_BACKEND_PORT,
+    DEFAULT_FRONTEND_PORT,
+    FRONTEND_PORT_ENV_VAR,
+    get_backend_port,
+    get_frontend_port,
+)
+from launcher_settings import (
+    load_launcher_settings,
+    save_launcher_settings,
+    validate_launcher_settings,
+)
+
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 VENV_PYTHON = BASE_DIR / ".venv" / "Scripts" / "python.exe"
 LOGS_DIR = BASE_DIR / "logs"
-
-BACKEND_PORT = 8000
-FRONTEND_PORT = 3000
 
 LOG_READ_CHUNK_SIZE = 4096
 LOG_FLUSH_INTERVAL_MS = 80
@@ -42,47 +53,38 @@ _LOG_DIR_LOCK = threading.Lock()
 
 
 def is_port_in_use(port: int) -> bool:
+    """检查本机回环地址上是否已有服务接受连接。
+
+    Args:
+        port: 要检查的 TCP 端口。
+
+    Returns:
+        有服务监听时返回 True，否则返回 False。
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def kill_port(port: int) -> bool:
-    """终止占用指定端口的进程 (Windows)。"""
-    if sys.platform != "win32":
-        return False
+def get_port_bind_error(port: int) -> str | None:
+    """通过实际绑定探测端口是否可供新服务使用。
 
-    try:
-        result = subprocess.run(
-            ["netstat", "-ano", "-p", "TCP"],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and f":{port}" in parts[1] and parts[3] == "LISTENING":
-                pid = parts[4]
-                subprocess.run(
-                    ["taskkill", "/PID", pid, "/T", "/F"],
-                    check=False,
-                    capture_output=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                return True
-    except Exception:
-        pass
+    Args:
+        port: 要探测的 TCP 端口。
 
-    return False
-
-
-def wait_for_port_release(port: int, timeout: float = 3.0, interval: float = 0.2) -> bool:
-    """后台轮询端口释放，避免阻塞 Tk 主线程。"""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not is_port_in_use(port):
-            return True
-        time.sleep(interval)
-    return not is_port_in_use(port)
+    Returns:
+        端口可绑定时返回 None；被占用、系统保留或无权限时返回中文错误说明。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror == 10013 or exc.errno in {errno.EACCES, errno.EPERM}:
+                return f"端口 {port} 被 Windows 保留或当前账户无绑定权限，请在启动器中更换端口"
+            if winerror == 10048 or exc.errno == errno.EADDRINUSE:
+                return f"端口 {port} 已被其他服务占用，请先确认该服务或在启动器中更换端口"
+            return f"端口 {port} 无法绑定：{exc}"
+    return None
 
 
 def ensure_logs_dir() -> Path:
@@ -592,6 +594,13 @@ class ServicePanel(ctk.CTkFrame):
         full_env["PYTHONUTF8"] = "1"
         return full_env
 
+    def _fail_start(self, message: str) -> None:
+        self.write_log(f"[ERROR] {message}\n")
+        self._close_log_file()
+        with self._state_lock:
+            self._state = "stopped"
+        self._queue_event("status", "stopped")
+
     def _start_worker(self) -> None:
         if self._shutdown:
             with self._state_lock:
@@ -602,16 +611,16 @@ class ServicePanel(ctk.CTkFrame):
         self._open_log_file()
 
         if is_port_in_use(self.port):
-            self.write_log(f"[WARN] 端口 {self.port} 已被占用，正在终止残留进程...\n")
-            kill_port(self.port)
-            if not wait_for_port_release(self.port):
-                self.write_log(f"[ERROR] 无法释放端口 {self.port}\n")
-                self._close_log_file()
-                with self._state_lock:
-                    self._state = "stopped"
-                self._queue_event("status", "stopped")
-                return
-            self.write_log(f"[INFO] 端口 {self.port} 已释放\n")
+            self._fail_start(
+                f"端口 {self.port} 已有服务监听。启动器不会自动终止未知进程，请复用现有服务或更换端口。"
+            )
+            return
+
+        # connect_ex 无法识别 Windows 排除端口，必须实际 bind 才能提前捕获 WinError 10013。
+        bind_error = get_port_bind_error(self.port)
+        if bind_error:
+            self._fail_start(bind_error)
+            return
 
         kwargs = {
             "cwd": self.cwd,
@@ -634,17 +643,22 @@ class ServicePanel(ctk.CTkFrame):
             self._queue_event("status", "stopped")
             return
 
-        if self._shutdown:
+        should_kill = False
+        with self._state_lock:
+            # 关闭信号与进程登记必须处于同一临界区，避免窗口关闭后漏掉刚创建的子进程。
+            if self._shutdown:
+                should_kill = True
+            else:
+                self._proc = proc
+                self._state = "running"
+
+        if should_kill:
             self._kill_proc(proc)
             self._close_log_file()
             with self._state_lock:
                 self._state = "stopped"
             self._queue_event("status", "stopped")
             return
-
-        with self._state_lock:
-            self._proc = proc
-            self._state = "running"
 
         self._queue_event("status", "running")
         self._monitor_thread = threading.Thread(target=self._monitor_process, args=(proc,), daemon=True)
@@ -710,6 +724,49 @@ class ServicePanel(ctk.CTkFrame):
         with self._state_lock:
             return self._state == "running" and self._proc is not None and self._proc.poll() is None
 
+    def is_stopped(self) -> bool:
+        """返回服务面板是否处于可重新配置的停止状态。
+
+        Args:
+            无。
+
+        Returns:
+            仅当服务状态为 stopped 时返回 True。
+        """
+        with self._state_lock:
+            return self._state == "stopped"
+
+    def get_state(self) -> ServiceState:
+        """返回服务面板当前的线程安全状态快照。
+
+        Args:
+            无。
+
+        Returns:
+            stopped、starting、running 或 stopping 之一。
+        """
+        with self._state_lock:
+            return self._state
+
+    def configure_runtime(self, *, port: int, url: str, env: dict[str, str]) -> bool:
+        """在服务停止时同步更新监听端口、打开地址和子进程环境。
+
+        Args:
+            port: 服务下次启动时使用的监听端口。
+            url: 面板“打开”按钮访问的地址。
+            env: 启动子进程时注入的环境变量。
+
+        Returns:
+            更新成功返回 True；服务未停止时返回 False。
+        """
+        with self._state_lock:
+            if self._state != "stopped":
+                return False
+            self.port = port
+            self.url = url
+            self.env = dict(env)
+        return True
+
     def force_cleanup(self) -> None:
         with self._state_lock:
             self._shutdown = True
@@ -740,6 +797,29 @@ class App(ctk.CTk):
         self.grid_rowconfigure(1, weight=1)
 
         self.npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+        warnings: list[str] = []
+        try:
+            default_backend_port = get_backend_port()
+        except ValueError as exc:
+            default_backend_port = DEFAULT_BACKEND_PORT
+            warnings.append(str(exc))
+        try:
+            default_frontend_port = get_frontend_port()
+        except ValueError as exc:
+            default_frontend_port = DEFAULT_FRONTEND_PORT
+            warnings.append(str(exc))
+
+        try:
+            settings, settings_warning = load_launcher_settings(default_backend_port, default_frontend_port)
+        except ValueError as exc:
+            # 环境变量彼此冲突时仍要保证启动器能够打开，并继续尝试读取有效的持久化设置。
+            warnings.append(f"环境变量端口配置无效：{exc}")
+            settings, settings_warning = load_launcher_settings(DEFAULT_BACKEND_PORT, DEFAULT_FRONTEND_PORT)
+        if settings_warning:
+            warnings.append(settings_warning)
+        self.backend_port = settings.backend_port
+        self.frontend_port = settings.frontend_port
+        self._applied_settings = settings
 
         toolbar = ctk.CTkFrame(
             self,
@@ -774,6 +854,61 @@ class App(ctk.CTk):
             command=self.stop_all,
         ).pack(side="left")
 
+        port_group = ctk.CTkFrame(
+            toolbar,
+            corner_radius=12,
+            fg_color=("gray94", "gray16"),
+        )
+        port_group.grid(row=0, column=1, sticky="ew", padx=12, pady=8)
+        port_group.grid_columnconfigure(5, weight=1)
+
+        ctk.CTkLabel(port_group, text="后端端口", font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=0, padx=(12, 6), pady=(8, 4)
+        )
+        self.backend_port_var = ctk.StringVar(value=str(self.backend_port))
+        self.backend_port_entry = ctk.CTkEntry(
+            port_group,
+            width=78,
+            height=30,
+            justify="center",
+            textvariable=self.backend_port_var,
+        )
+        self.backend_port_entry.grid(row=0, column=1, padx=(0, 12), pady=(8, 4))
+
+        ctk.CTkLabel(port_group, text="前端端口", font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=2, padx=(0, 6), pady=(8, 4)
+        )
+        self.frontend_port_var = ctk.StringVar(value=str(self.frontend_port))
+        self.frontend_port_entry = ctk.CTkEntry(
+            port_group,
+            width=78,
+            height=30,
+            justify="center",
+            textvariable=self.frontend_port_var,
+        )
+        self.frontend_port_entry.grid(row=0, column=3, padx=(0, 10), pady=(8, 4))
+
+        self.apply_ports_button = ctk.CTkButton(
+            port_group,
+            text="应用端口",
+            width=94,
+            height=30,
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            command=self._apply_port_settings,
+        )
+        self.apply_ports_button.grid(row=0, column=4, padx=(0, 12), pady=(8, 4))
+
+        initial_status = "；".join(warnings) if warnings else "端口保存在当前用户配置中，服务停止时可修改"
+        self.port_status_label = ctk.CTkLabel(
+            port_group,
+            text=initial_status,
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=("#b45309", "#fbbf24") if warnings else ("gray42", "gray65"),
+        )
+        self.port_status_label.grid(row=1, column=0, columnspan=6, sticky="ew", padx=12, pady=(0, 7))
+
         self.theme_selector = ctk.CTkSegmentedButton(
             toolbar,
             values=["系统", "浅色", "深色"],
@@ -795,9 +930,13 @@ class App(ctk.CTk):
             title="Backend",
             command=[str(VENV_PYTHON), "main.py"],
             cwd=BASE_DIR,
-            port=BACKEND_PORT,
-            url=f"http://localhost:{BACKEND_PORT}/docs",
+            port=self.backend_port,
+            url=f"http://127.0.0.1:{self.backend_port}/docs",
             accent_color="#15803d",
+            env={
+                BACKEND_PORT_ENV_VAR: str(self.backend_port),
+                FRONTEND_PORT_ENV_VAR: str(self.frontend_port),
+            },
         )
         self.backend.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
@@ -815,9 +954,10 @@ class App(ctk.CTk):
             title="Frontend",
             command=[],
             cwd=FRONTEND_DIR,
-            port=FRONTEND_PORT,
-            url=f"http://localhost:{FRONTEND_PORT}",
+            port=self.frontend_port,
+            url=f"http://127.0.0.1:{self.frontend_port}",
             accent_color="#2563eb",
+            env={"NEXT_PUBLIC_API_BASE": f"http://127.0.0.1:{self.backend_port}"},
         )
         self.frontend.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
@@ -829,10 +969,121 @@ class App(ctk.CTk):
         )
         self.frontend_mode.pack(side="right")
         self.frontend_mode.set("生产模式")
-        self._on_frontend_mode_change("生产模式")
+        self._on_frontend_mode_change("生产模式", announce=False)
+
+        # 所有启动入口都先应用输入框内容，防止界面显示值与实际监听端口不一致。
+        self.backend.start_btn.configure(command=self._start_backend)
+        self.frontend.start_btn.configure(command=self._start_frontend)
+        self._port_controls_enabled: bool | None = None
+        self._sync_port_controls()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         atexit.register(self._atexit_cleanup)
+
+    def _set_port_status(self, message: str, level: str = "info") -> None:
+        colors = {
+            "info": ("gray42", "gray65"),
+            "success": ("#15803d", "#86efac"),
+            "warning": ("#b45309", "#fbbf24"),
+            "error": ("#b91c1c", "#fca5a5"),
+        }
+        self.port_status_label.configure(text=message, text_color=colors[level])
+
+    def _sync_port_controls(self) -> None:
+        enabled = self.backend.is_stopped() and self.frontend.is_stopped()
+        if enabled != self._port_controls_enabled:
+            state = "normal" if enabled else "disabled"
+            self.backend_port_entry.configure(state=state)
+            self.frontend_port_entry.configure(state=state)
+            self.apply_ports_button.configure(state=state)
+            self._port_controls_enabled = enabled
+        if self.winfo_exists():
+            self.after(250, self._sync_port_controls)
+
+    def _apply_port_settings(self) -> bool:
+        if not self.backend.is_stopped() or not self.frontend.is_stopped():
+            self._set_port_status("请先停止前后端服务，再修改端口", "error")
+            return False
+
+        try:
+            settings = validate_launcher_settings(self.backend_port_var.get(), self.frontend_port_var.get())
+        except ValueError as exc:
+            self._set_port_status(str(exc), "error")
+            return False
+
+        for label, port in (("后端", settings.backend_port), ("前端", settings.frontend_port)):
+            if is_port_in_use(port):
+                self._set_port_status(
+                    f"{label}端口 {port} 已有外部服务监听；请先停止它，启动器不会自动终止未知进程",
+                    "error",
+                )
+                return False
+            bind_error = get_port_bind_error(port)
+            if bind_error:
+                self._set_port_status(bind_error, "error")
+                return False
+
+        try:
+            save_launcher_settings(settings)
+        except OSError as exc:
+            self._set_port_status(f"端口设置保存失败：{exc}", "error")
+            return False
+
+        backend_configured = self.backend.configure_runtime(
+            port=settings.backend_port,
+            url=f"http://127.0.0.1:{settings.backend_port}/docs",
+            env={
+                BACKEND_PORT_ENV_VAR: str(settings.backend_port),
+                FRONTEND_PORT_ENV_VAR: str(settings.frontend_port),
+            },
+        )
+        frontend_configured = self.frontend.configure_runtime(
+            port=settings.frontend_port,
+            url=f"http://127.0.0.1:{settings.frontend_port}",
+            env={"NEXT_PUBLIC_API_BASE": f"http://127.0.0.1:{settings.backend_port}"},
+        )
+        if not backend_configured or not frontend_configured:
+            self._set_port_status("服务状态已变化，请停止服务后重试", "error")
+            return False
+
+        self.backend_port = settings.backend_port
+        self.frontend_port = settings.frontend_port
+        self._applied_settings = settings
+        self._on_frontend_mode_change(self.frontend_mode.get(), announce=False)
+        self._set_port_status(
+            f"设置已保存：后端 {self.backend_port} / 前端 {self.frontend_port}",
+            "success",
+        )
+        return True
+
+    def _ensure_port_settings_applied(self) -> bool:
+        try:
+            requested = validate_launcher_settings(self.backend_port_var.get(), self.frontend_port_var.get())
+        except ValueError as exc:
+            self._set_port_status(str(exc), "error")
+            return False
+        if requested == self._applied_settings:
+            return True
+        return self._apply_port_settings()
+
+    def _service_can_start(self, service: ServicePanel, label: str) -> bool:
+        state = service.get_state()
+        if state == "stopping":
+            self._set_port_status(f"{label}服务正在停止，请等待状态变为已停止后再启动", "error")
+            return False
+        if state in {"starting", "running"}:
+            return True
+        if is_port_in_use(service.port):
+            self._set_port_status(
+                f"{label}端口 {service.port} 已有外部服务监听；请先停止它或更换端口",
+                "error",
+            )
+            return False
+        bind_error = get_port_bind_error(service.port)
+        if bind_error:
+            self._set_port_status(bind_error, "error")
+            return False
+        return True
 
     def _on_theme_mode_change(self, mode: str) -> None:
         mapping = {
@@ -842,17 +1093,28 @@ class App(ctk.CTk):
         }
         ctk.set_appearance_mode(mapping[mode])
 
-    def _on_frontend_mode_change(self, mode: str) -> None:
+    def _on_frontend_mode_change(self, mode: str, *, announce: bool = True) -> None:
+        run_args = f"--hostname 127.0.0.1 --port {self.frontend_port}"
         if mode == "生产模式":
+            command = f"{self.npm_cmd} run build && {self.npm_cmd} run start -- {run_args}"
             if sys.platform == "win32":
-                cmd = ["cmd.exe", "/c", f"{self.npm_cmd} run build && {self.npm_cmd} run start"]
+                cmd = ["cmd.exe", "/c", command]
             else:
-                cmd = ["sh", "-c", f"{self.npm_cmd} run build && {self.npm_cmd} run start"]
+                cmd = ["sh", "-c", command]
         else:
-            cmd = [self.npm_cmd, "run", "dev"]
+            cmd = [
+                self.npm_cmd,
+                "run",
+                "dev",
+                "--",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                str(self.frontend_port),
+            ]
 
         self.frontend.set_command(cmd)
-        if self.frontend.is_running():
+        if announce and self.frontend.is_running():
             self.frontend.write_log("[INFO] 前端运行模式已切换，重启前端后生效。\n")
 
     def _build_backend_command(self) -> list[str]:
@@ -866,7 +1128,27 @@ class App(ctk.CTk):
         if self.backend.is_running():
             self.backend.write_log("[INFO] 后端调试模式已切换，重启后端后生效。\n")
 
+    def _start_backend(self) -> None:
+        if not self._ensure_port_settings_applied():
+            return
+        if self._service_can_start(self.backend, "后端"):
+            self.backend.start()
+
+    def _start_frontend(self) -> None:
+        if not self._ensure_port_settings_applied():
+            return
+        if not self._service_can_start(self.backend, "后端"):
+            return
+        if self._service_can_start(self.frontend, "前端"):
+            self.frontend.start()
+
     def start_all(self) -> None:
+        if not self._ensure_port_settings_applied():
+            return
+        if not self._service_can_start(self.backend, "后端"):
+            return
+        if not self._service_can_start(self.frontend, "前端"):
+            return
         self.backend.start()
         self.frontend.start()
 

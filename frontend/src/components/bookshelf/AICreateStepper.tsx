@@ -13,7 +13,12 @@ import {
   trimCachedStepsToPrefix,
   type AICreateCacheInput,
 } from "@/lib/aiCreateCache";
-import { OptionalSliderParam, OptionalNumberParam, OptionalTextParam } from "@/components/shared/OptionalParamControls";
+import {
+  buildGenerationParamsPayload,
+  DEFAULT_GENERATION_PARAMS,
+  GenerationParamsCollapse,
+  type GenerationParamsValue,
+} from "@/components/shared/GenerationParamsCollapse";
 import type { AICreateCachedSteps, AICreateRequest, AICreateResponse, AICreateStepKey } from "@/types/novel";
 
 interface AICreateStepperProps {
@@ -87,12 +92,7 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
   const [chapters, setChapters] = useState(initialCache?.input.number_of_chapters ?? 600);
   const [wordsPerChapter, setWordsPerChapter] = useState(initialCache?.input.words_per_chapter ?? 3000);
   const [showGenParams, setShowGenParams] = useState(false);
-  const [temperature, setTemperature] = useState<number | null>(null);
-  const [topP, setTopP] = useState<number | null>(null);
-  const [maxTokens, setMaxTokens] = useState<number | null>(null);
-  const [presencePenalty, setPresencePenalty] = useState<number | null>(null);
-  const [frequencyPenalty, setFrequencyPenalty] = useState<number | null>(null);
-  const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
+  const [genParams, setGenParams] = useState<GenerationParamsValue>(DEFAULT_GENERATION_PARAMS);
   const [cachedSteps, setCachedSteps] = useState<AICreateCachedSteps>(initialSteps);
   const [steps, setSteps] = useState<StepState[]>(
     buildStepStates(initialSteps, initialCache?.failed_step),
@@ -174,12 +174,7 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
       number_of_chapters: input.number_of_chapters,
       words_per_chapter: input.words_per_chapter,
       ...(hasAICreateCachedSteps(normalizedCachedSteps) && { cached_steps: normalizedCachedSteps }),
-      ...(temperature != null && { temperature }),
-      ...(topP != null && { top_p: topP }),
-      ...(maxTokens != null && { max_tokens: maxTokens }),
-      ...(presencePenalty != null && { presence_penalty: presencePenalty }),
-      ...(frequencyPenalty != null && { frequency_penalty: frequencyPenalty }),
-      ...(systemPrompt != null && { system_prompt: systemPrompt }),
+      ...buildGenerationParamsPayload(genParams),
     };
 
     try {
@@ -306,73 +301,13 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
         </div>
       </div>
 
-      {/* Generation Parameters (collapsible) */}
-      <div>
-        <button
-          type="button"
-          className="flex items-center gap-2 text-sm font-medium text-muted hover:text-foreground transition-colors py-1"
-          onClick={() => setShowGenParams(!showGenParams)}
-          disabled={isRunning}
-        >
-          <svg
-            className={`w-4 h-4 transition-transform ${showGenParams ? "rotate-90" : ""}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-          {t("genParams.title")}
-        </button>
-        {showGenParams && (
-          <div className="border border-border rounded-lg p-4 mt-1 space-y-3 bg-surface-secondary/30">
-            <p className="text-xs text-muted">{t("genParams.hint")}</p>
-
-            <OptionalSliderParam
-              label={t("genParams.temperature")}
-              value={temperature}
-              onToggle={(on) => setTemperature(on ? 0.7 : null)}
-              onValueChange={setTemperature}
-              min={0} max={2} step={0.05}
-            />
-            <OptionalSliderParam
-              label={t("genParams.topP")}
-              value={topP}
-              onToggle={(on) => setTopP(on ? 0.9 : null)}
-              onValueChange={setTopP}
-              min={0} max={1} step={0.05}
-            />
-            <OptionalNumberParam
-              label={t("genParams.maxTokens")}
-              value={maxTokens}
-              onToggle={(on) => setMaxTokens(on ? 4096 : null)}
-              onValueChange={setMaxTokens}
-              min={256} max={1000000} step={256}
-            />
-            <OptionalSliderParam
-              label={t("genParams.presencePenalty")}
-              value={presencePenalty}
-              onToggle={(on) => setPresencePenalty(on ? 0 : null)}
-              onValueChange={setPresencePenalty}
-              min={-2} max={2} step={0.1}
-            />
-            <OptionalSliderParam
-              label={t("genParams.frequencyPenalty")}
-              value={frequencyPenalty}
-              onToggle={(on) => setFrequencyPenalty(on ? 0 : null)}
-              onValueChange={setFrequencyPenalty}
-              min={-2} max={2} step={0.1}
-            />
-            <OptionalTextParam
-              label={t("genParams.systemPrompt")}
-              value={systemPrompt}
-              onToggle={(on) => setSystemPrompt(on ? "" : null)}
-              onValueChange={setSystemPrompt}
-              placeholder={t("genParams.systemPromptPlaceholder")}
-            />
-          </div>
-        )}
-      </div>
+      <GenerationParamsCollapse
+        value={genParams}
+        onChange={setGenParams}
+        isOpen={showGenParams}
+        onOpenChange={setShowGenParams}
+        disabled={isRunning}
+      />
 
       {/* Step Progress */}
       {(isRunning || result || hasCachedSteps || steps.some((step) => step.status === "error")) && (

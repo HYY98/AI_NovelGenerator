@@ -97,3 +97,15 @@ llm:
         create_core_factions:
           provider: openai_gpt4o_mini
           timeout_seconds: null
+    create_characters_by_ai:
+      default_provider: openai_gpt4o_mini
+      steps:
+        create_core_characters:
+          provider: openai_gpt4o_mini
+          timeout_seconds: null
+    create_character_relations_by_ai:
+      default_provider: openai_gpt4o_mini
+      steps:
+        create_character_relations:
+          provider: openai_gpt4o_mini
+          timeout_seconds: null

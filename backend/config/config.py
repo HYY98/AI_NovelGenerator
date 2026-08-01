@@ -36,6 +36,12 @@ _KNOWN_WORKFLOW_STEPS: dict[str, tuple[str, ...]] = {
     "create_factions_by_ai": (
         "create_core_factions",
     ),
+    "create_characters_by_ai": (
+        "create_core_characters",
+    ),
+    "create_character_relations_by_ai": (
+        "create_character_relations",
+    ),
 }
 _PROVIDER_RENAMES_KEY = "_provider_renames"
 _API_VERSION_RE = re.compile(r"^v\d+(?:[a-z0-9._-]+)?$", re.IGNORECASE)

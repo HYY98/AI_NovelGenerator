@@ -135,6 +135,50 @@ def _build_failure_message(exc: Exception, api_key: str) -> str:
     return _redact_sensitive_text(message, api_key)
 
 
+def _extract_response_debug_payload(exc: BaseException, api_key: str) -> dict[str, object]:
+    """从异常链中提取可用于调试的失败响应信息。
+
+    Args:
+        exc: 当前测试步骤捕获到的异常。
+        api_key: 当前表单中的 API Key，用于脱敏。
+
+    Returns:
+        包含异常类型、错误消息、状态码与响应正文摘要的调试载荷。
+    """
+    chain: list[dict[str, object]] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        item: dict[str, object] = {
+            "type": type(current).__name__,
+            "message": _redact_sensitive_text(str(current), api_key),
+        }
+
+        status_code = getattr(current, "status_code", None)
+        if status_code is not None:
+            item["status_code"] = status_code
+
+        body = getattr(current, "body", None)
+        if body is not None:
+            item["body"] = _redact_sensitive_text(str(body), api_key)
+
+        response = getattr(current, "response", None)
+        if response is not None:
+            response_status = getattr(response, "status_code", None)
+            if response_status is not None:
+                item["response_status_code"] = response_status
+
+            response_text = getattr(response, "text", None)
+            if response_text:
+                item["response_text"] = _redact_sensitive_text(str(response_text), api_key)
+
+        chain.append(item)
+        current = current.__cause__ or current.__context__
+
+    return {"error": chain[0], "exception_chain": chain}
+
+
 def _result(
     capability: ProviderTestCapability,
     label: str,
@@ -167,6 +211,7 @@ def _result(
 async def _run_step(
     capability: ProviderTestCapability,
     label: str,
+    provider_alias: str,
     api_key: str,
     runner: Callable[[], Awaitable[None]],
     *,
@@ -177,6 +222,7 @@ async def _run_step(
     Args:
         capability: 能力标识。
         label: 前端展示名称。
+        provider_alias: 当前 Provider 别名，用于调试日志定位。
         api_key: 当前表单中的 API Key，用于错误脱敏。
         runner: 实际执行测试的异步回调。
         success_message: 测试通过时展示给前端的结果摘要。
@@ -188,6 +234,11 @@ async def _run_step(
     try:
         await runner()
     except Exception as exc:
+        log_provider_test_raw_response(
+            provider_alias,
+            capability,
+            _extract_response_debug_payload(exc, api_key),
+        )
         return _result(
             capability,
             label,
@@ -331,6 +382,7 @@ async def test_llm_provider_capabilities(
     initial_stream_result = await _run_step(
         "connection",
         "接口可用性",
+        alias,
         api_key,
         lambda: run_streaming("connection"),
         success_message="流式接口可用，已同步完成流式检查",
@@ -348,7 +400,7 @@ async def test_llm_provider_capabilities(
             )
         )
     else:
-        connection_result = await _run_step("connection", "接口可用性", api_key, run_connection)
+        connection_result = await _run_step("connection", "接口可用性", alias, api_key, run_connection)
         results[0] = connection_result
 
         if connection_result.status != "passed":
@@ -373,7 +425,7 @@ async def test_llm_provider_capabilities(
             )
 
         # 普通接口可用时再复测流式能力，避免把必须 stream=true 的模型误判为不可用。
-        results.append(await _run_step("streaming", "流式输出", api_key, run_streaming))
+        results.append(await _run_step("streaming", "流式输出", alias, api_key, run_streaming))
 
     async def run_json_schema() -> None:
         """执行 JSON Schema 结构化输出能力测试。
@@ -416,8 +468,8 @@ async def test_llm_provider_capabilities(
             response.raw_response or {"content": response.content},
         )
 
-    results.append(await _run_step("json_schema", "JSON Schema", api_key, run_json_schema))
-    results.append(await _run_step("function_calling", "Function Calling", api_key, run_function_calling))
+    results.append(await _run_step("json_schema", "JSON Schema", alias, api_key, run_json_schema))
+    results.append(await _run_step("function_calling", "Function Calling", alias, api_key, run_function_calling))
 
     recommendation = ProviderCapabilityRecommendation(
         supports_streaming=results[1].status == "passed",

@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Button } from "@heroui/react";
-import { apiGet, apiPost } from "@/lib/api";
+import { Button, Switch } from "@heroui/react";
+import { apiGet, apiPost, apiPostSSE } from "@/lib/api";
 import {
   FIELD_LABEL_MAP,
   REWRITABLE_NOVEL_FIELDS,
@@ -43,6 +43,7 @@ interface NovelRewriteAssistantProps {
 
 interface PendingRewriteRequest {
   provider: string;
+  useStream: boolean;
   targetField: NovelRewriteFieldKey;
   instruction: string;
   messageId: string;
@@ -115,6 +116,36 @@ function buildRewriteHistory(
     .map(({ role, content }) => ({ role, content }));
 }
 
+/**
+ * 从 SSE 完成事件中提取改写结果。
+ *
+ * Args:
+ *   data: 后端 SSE done 事件携带的数据。
+ *
+ * Returns:
+ *   可写入改写流程的最终字段结果；格式不匹配时返回 null。
+ */
+function extractRewriteStreamResult(data: Record<string, unknown>): RewriteNovelFieldResponse | null {
+  const result = data.result;
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const payload = result as Partial<RewriteNovelFieldResponse>;
+  if (typeof payload.target_field !== "string") {
+    return null;
+  }
+
+  if (typeof payload.value !== "string" && !Array.isArray(payload.value)) {
+    return null;
+  }
+
+  return {
+    target_field: payload.target_field as NovelRewriteFieldKey,
+    value: payload.value,
+  };
+}
+
 export default function NovelRewriteAssistant({
   data,
   rewriteState,
@@ -127,6 +158,8 @@ export default function NovelRewriteAssistant({
   const [selectedField, setSelectedField] = useState<NovelRewriteFieldKey>("plot");
   const [selectedProvider, setSelectedProvider] = useState("");
   const [providers, setProviders] = useState<string[]>([]);
+  const [providerStreamingSupport, setProviderStreamingSupport] = useState<Record<string, boolean>>({});
+  const [useStream, setUseStream] = useState(true);
   const [providerLoading, setProviderLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -146,13 +179,21 @@ export default function NovelRewriteAssistant({
         const enabledProviders = Object.entries(config.llm.providers)
           .filter(([, provider]) => provider.enabled)
           .map(([alias]) => alias);
+        const streamingSupport = Object.fromEntries(
+          Object.entries(config.llm.providers).map(([alias, provider]) => [
+            alias,
+            Boolean(provider.enabled && provider.supports_streaming),
+          ]),
+        );
         const defaultProvider = config.llm.default_provider;
         const initialProvider = enabledProviders.includes(defaultProvider)
           ? defaultProvider
           : enabledProviders[0] || "";
 
         setProviders(enabledProviders);
+        setProviderStreamingSupport(streamingSupport);
         setSelectedProvider((current) => current || initialProvider);
+        setUseStream(Boolean(streamingSupport[initialProvider]));
         setError("");
       } catch (err) {
         if (!mounted) return;
@@ -180,6 +221,8 @@ export default function NovelRewriteAssistant({
   const activeRevisionId = getActiveRevisionId(normalizedState, selectedField);
   const selectedFieldLabel = tn(FIELD_LABEL_MAP[selectedField]);
   const canSend = Boolean(selectedProvider) && Boolean(input.trim()) && !sending;
+  const selectedProviderSupportsStreaming = Boolean(providerStreamingSupport[selectedProvider]);
+  const effectiveUseStream = selectedProviderSupportsStreaming && useStream;
   const activeRevisionIndex = revisions.findIndex((revision) => revision.id === activeRevisionId);
   const versionPosition = revisions.length > 0 && activeRevisionIndex >= 0
     ? `${activeRevisionIndex + 1}/${revisions.length}`
@@ -191,6 +234,12 @@ export default function NovelRewriteAssistant({
 
   const applyStateOnly = (nextState: WritingDraftRewriteState) => {
     onRewriteStateChange(nextState);
+  };
+
+  const handleProviderChange = (provider: string) => {
+    setSelectedProvider(provider);
+    // 切换 Provider 时按能力重新默认流式，避免把不支持流式的选择遗留到请求体。
+    setUseStream(Boolean(providerStreamingSupport[provider]));
   };
 
   const handleRevisionChange = (revisionId: string) => {
@@ -239,6 +288,7 @@ export default function NovelRewriteAssistant({
     const provider = request.provider;
     const targetField = request.targetField;
     const currentValue = getFieldValue(data, targetField);
+    const shouldUseStream = Boolean(request.useStream && providerStreamingSupport[provider]);
 
     if (!instruction || !provider || sending) {
       return;
@@ -268,6 +318,7 @@ export default function NovelRewriteAssistant({
 
     const payload: RewriteNovelFieldRequest = {
       provider,
+      use_stream: shouldUseStream,
       target_field: targetField,
       instruction,
       current_value: currentValue,
@@ -279,10 +330,28 @@ export default function NovelRewriteAssistant({
     };
 
     try {
-      const response = await apiPost<RewriteNovelFieldResponse>(
-        "/api/llm/rewrite-novel-field",
-        payload,
-      );
+      let response: RewriteNovelFieldResponse | null = null;
+      if (shouldUseStream) {
+        await apiPostSSE("/api/llm/rewrite-novel-field/stream", payload, (event, eventData) => {
+          if (event === "error") {
+            throw new Error(String(eventData.error || eventData.message || t("rewriteFailed")));
+          }
+
+          if (event === "done") {
+            response = extractRewriteStreamResult(eventData);
+          }
+        });
+      } else {
+        response = await apiPost<RewriteNovelFieldResponse>(
+          "/api/llm/rewrite-novel-field",
+          payload,
+        );
+      }
+
+      if (!response) {
+        throw new Error(t("rewriteFailed"));
+      }
+
       // AI 改写前先把当前表单值压入版本栈，保证自动覆盖后仍可返回旧版本。
       let nextState = ensureFieldCurrentRevision(stateForRequest, targetField, currentValue);
       nextState = appendAiRewriteRevision(
@@ -316,6 +385,7 @@ export default function NovelRewriteAssistant({
       setError(errorMessage);
       setRetryRequest({
         provider,
+        useStream: shouldUseStream,
         targetField,
         instruction,
         messageId: requestMessageId,
@@ -328,6 +398,7 @@ export default function NovelRewriteAssistant({
   const handleSend = async () => {
     await executeRewriteRequest({
       provider: selectedProvider,
+      useStream: effectiveUseStream,
       targetField: selectedField,
       instruction: input,
     });
@@ -339,10 +410,11 @@ export default function NovelRewriteAssistant({
     }
 
     setSelectedField(retryRequest.targetField);
-    setSelectedProvider(retryRequest.provider);
+    handleProviderChange(retryRequest.provider);
     await executeRewriteRequest(
       {
         provider: retryRequest.provider,
+        useStream: retryRequest.useStream,
         targetField: retryRequest.targetField,
         instruction: retryRequest.instruction,
       },
@@ -352,12 +424,12 @@ export default function NovelRewriteAssistant({
 
   return (
     <aside
-      className={`fixed bottom-24 right-6 z-40 max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-surface shadow-2xl transition-all max-sm:inset-x-3 max-sm:bottom-20 max-sm:w-auto ${
-        isCollapsed ? "w-[260px]" : "w-[390px]"
+      className={`z-40 flex max-w-[calc(100vw-2rem)] flex-col overflow-hidden border border-border bg-surface transition-all max-[1799px]:fixed max-[1799px]:bottom-20 max-[1799px]:right-3 max-[1799px]:rounded-xl max-[1799px]:shadow-2xl max-sm:bottom-36 max-sm:left-3 min-[1800px]:relative min-[1800px]:h-full min-[1800px]:max-w-none min-[1800px]:shrink-0 min-[1800px]:border-y-0 min-[1800px]:border-r-0 ${
+        isCollapsed ? "w-[260px] min-[1800px]:w-[72px]" : "w-[390px] max-sm:w-auto min-[1800px]:w-[390px]"
       }`}
     >
       <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-        <div className="min-w-0">
+        <div className={`min-w-0 ${isCollapsed ? "min-[1800px]:hidden" : ""}`}>
           <h3 className="text-sm font-semibold text-foreground">{t("title")}</h3>
           {!isCollapsed && <p className="truncate text-xs text-muted">{selectedFieldLabel}</p>}
         </div>
@@ -419,7 +491,7 @@ export default function NovelRewriteAssistant({
 
       {!isCollapsed && (
         <>
-      <div className="max-h-64 min-h-40 space-y-3 overflow-y-auto px-4 py-3">
+      <div className="max-h-64 min-h-40 space-y-3 overflow-y-auto px-4 py-3 min-[1800px]:min-h-0 min-[1800px]:max-h-none min-[1800px]:flex-1">
         {messages.length === 0 ? (
           <div className="flex h-28 items-center justify-center rounded-lg border border-dashed border-border/70 text-xs text-muted">
             {t("emptyMessages")}
@@ -505,7 +577,7 @@ export default function NovelRewriteAssistant({
             <select
               className={`${inlineSelectClassName} max-w-[12rem]`}
               value={selectedProvider}
-              onChange={(event) => setSelectedProvider(event.target.value)}
+              onChange={(event) => handleProviderChange(event.target.value)}
               disabled={sending || providerLoading || providers.length === 0}
               title={t("provider")}
             >
@@ -519,6 +591,22 @@ export default function NovelRewriteAssistant({
                 ))
               )}
             </select>
+
+            <div
+              className="shrink-0"
+              title={selectedProviderSupportsStreaming ? t("streamResponse") : t("streamResponseUnavailable")}
+            >
+              <Switch
+                isSelected={effectiveUseStream}
+                onChange={(nextValue) => setUseStream(nextValue)}
+                isDisabled={sending || providerLoading || !selectedProviderSupportsStreaming}
+              >
+                <Switch.Control>
+                  <Switch.Thumb />
+                </Switch.Control>
+                <Switch.Content className="whitespace-nowrap text-xs">{t("streamResponse")}</Switch.Content>
+              </Switch>
+            </div>
 
             <Button
               variant="primary"

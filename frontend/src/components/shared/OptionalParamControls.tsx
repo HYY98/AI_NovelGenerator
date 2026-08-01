@@ -140,3 +140,42 @@ export function OptionalTextParam({
     </div>
   );
 }
+
+/**
+ * 渲染始终有默认值的布尔生成参数开关。
+ *
+ * Args:
+ *   label: 开关显示名称。
+ *   description: 可选说明文本。
+ *   value: 当前布尔值。
+ *   onValueChange: 值变更回调。
+ *   disabled: 是否禁用开关。
+ *
+ * Returns:
+ *   布尔生成参数开关组件。
+ */
+export function BooleanParam({
+  label,
+  description,
+  value,
+  onValueChange,
+  disabled = false,
+}: {
+  label: string;
+  description?: string;
+  value: boolean;
+  onValueChange: (v: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="rounded-md border border-border bg-background/60 px-3 py-2">
+      <Switch isSelected={value} onChange={(v) => onValueChange(v)} isDisabled={disabled}>
+        <Switch.Control>
+          <Switch.Thumb />
+        </Switch.Control>
+        <Switch.Content className="text-sm">{label}</Switch.Content>
+      </Switch>
+      {description && <p className="mt-1 text-xs leading-5 text-muted">{description}</p>}
+    </div>
+  );
+}

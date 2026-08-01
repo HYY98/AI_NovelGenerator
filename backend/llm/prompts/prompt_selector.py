@@ -23,6 +23,8 @@ DEFAULT_PROMPT_FILENAME = "prompt_default.yaml"
 WORKFLOW_NAME = "create_novel_by_ai"
 REWRITE_NOVEL_FIELD_PROMPT_NAME = "rewrite_novel_field"
 CORE_FACTIONS_PROMPT_NAME = "create_factions_by_ai"
+CORE_CHARACTERS_PROMPT_NAME = "create_characters_by_ai"
+CHARACTER_RELATIONS_PROMPT_NAME = "create_character_relations_by_ai"
 LLM_PROVIDER_TEST_PROMPT_NAME = "llm_provider_test"
 
 DEFAULT_PROMPT_PATH = PROMPT_DIR / DEFAULT_PROMPT_FILENAME
@@ -55,6 +57,18 @@ REQUIRED_CORE_FACTIONS_PROMPT_KEYS: tuple[str, ...] = (
     "create_core_factions_prompt_without_schema_suffix",
 )
 
+REQUIRED_CORE_CHARACTERS_PROMPT_KEYS: tuple[str, ...] = (
+    "create_core_characters_prompt_base",
+    "create_core_characters_prompt_with_schema_suffix",
+    "create_core_characters_prompt_without_schema_suffix",
+)
+
+REQUIRED_CHARACTER_RELATIONS_PROMPT_KEYS: tuple[str, ...] = (
+    "create_character_relations_prompt_base",
+    "create_character_relations_prompt_with_schema_suffix",
+    "create_character_relations_prompt_without_schema_suffix",
+)
+
 REQUIRED_LLM_PROVIDER_TEST_PROMPT_KEYS: tuple[str, ...] = (
     "text_probe_prompt",
     "stream_probe_prompt",
@@ -67,6 +81,8 @@ REQUIRED_PROMPT_SECTIONS: dict[str, tuple[str, ...]] = {
     WORKFLOW_NAME: REQUIRED_CREATE_NOVEL_PROMPT_KEYS,
     REWRITE_NOVEL_FIELD_PROMPT_NAME: REQUIRED_REWRITE_NOVEL_FIELD_PROMPT_KEYS,
     CORE_FACTIONS_PROMPT_NAME: REQUIRED_CORE_FACTIONS_PROMPT_KEYS,
+    CORE_CHARACTERS_PROMPT_NAME: REQUIRED_CORE_CHARACTERS_PROMPT_KEYS,
+    CHARACTER_RELATIONS_PROMPT_NAME: REQUIRED_CHARACTER_RELATIONS_PROMPT_KEYS,
 }
 
 PROMPT_TEMPLATE_FIELDS: dict[str, set[str]] = {
@@ -116,6 +132,25 @@ PROMPT_TEMPLATE_FIELDS: dict[str, set[str]] = {
         "narrative_pov",
         "era_background",
         "tags_json",
+        "existing_core_factions_json",
+        "faction_count",
+        "generation_strategy",
+    },
+    "create_core_characters_prompt_base": {
+        "novel_profile_json",
+        "core_factions_json",
+        "existing_core_characters_json",
+        "character_count",
+        "user_guidance",
+    },
+    "create_character_relations_prompt_base": {
+        "novel_profile_json",
+        "characters_json",
+        "faction_bindings_json",
+        "existing_relations_json",
+        "allow_isolated_characters",
+        "relation_count_limit",
+        "user_guidance",
     },
     "function_result_probe_prompt": {"probe_token", "tool_result"},
 }

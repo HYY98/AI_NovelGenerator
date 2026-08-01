@@ -282,14 +282,24 @@ create_factions_by_ai:
     主线剧情文本:
     {plot}
 
+    已保存核心阵营（只可作为上下文和关系端点参考，禁止重复输出到 core_factions）:
+    {existing_core_factions_json}
+
+    本次生成参数:
+    - 目标新阵营数量: {faction_count}
+    - 追加生成策略:
+    {generation_strategy}
+
     生成目标:
     1. 只生成会长期影响主线冲突和主要角色站位的全书级核心阵营。
-    2. 核心阵营数量必须为 2 到 6 个，通常 3 到 5 个最合适。
+    2. 本次 core_factions 数量必须严格等于“目标新阵营数量”，且只能输出新阵营。
     3. 核心阵营不是世界百科，不要生成卷级地方组织、临时小队、任务型团体或章节事件组织。
     4. 本阶段角色尚未创建，严禁输出角色名单、角色归属、角色身份、角色绑定、角色派系职位。
     5. 如果主线剧情文本里已经出现人名，也只能把它当作剧情线索，不要围绕人物创建角色信息。
     6. 每个阵营必须直接服务主线冲突，并能在多卷中持续施加压力。
-    7. 阵营之间至少要有一组明确对立或历史敌对关系，也至少要有一组复杂关系，如冷战、秘密合作、依附、历史盟友反目。
+    7. faction_relations 可以为空；如果输出关系，关系端点可以引用本次新阵营或已保存核心阵营，但每条关系至少要连接一个本次新阵营。
+    8. 完全独立势力不得出现在 faction_relations 中；非独立势力优先与新旧阵营建立能推动主线的关系。
+    9. 如果用户提供正直度或关系量化度，必须按追加生成策略执行，不要把滑块说明写入字段文本。
 
     每个核心阵营必须包含:
     - name: 阵营名称
@@ -308,8 +318,8 @@ create_factions_by_ai:
     - tags: 阵营标签，可为空数组
 
     每条阵营关系必须包含:
-    - source_faction_name: 发起方阵营名称，必须来自本次生成的核心阵营名称
-    - target_faction_name: 目标方阵营名称，必须来自本次生成的核心阵营名称
+    - source_faction_name: 发起方阵营名称，必须来自本次新阵营名称或已保存核心阵营名称
+    - target_faction_name: 目标方阵营名称，必须来自本次新阵营名称或已保存核心阵营名称
     - relation_type: 只能使用 hostile/allied/cold_war/dependent/subordinate/trade_partner/secret_cooperation/historical_enemy
     - current_state: 当前关系状态
     - core_conflict: 关系中的核心矛盾
@@ -355,3 +365,135 @@ create_factions_by_ai:
         }}
       ]
     }}
+
+create_characters_by_ai:
+  create_core_characters_prompt_base: |
+    你是一名长篇小说角色架构师。请基于已经确认的全书设定与核心势力，设计本次新增的全书级核心角色。
+
+    小说设定:
+    {novel_profile_json}
+
+    已确认核心势力（只能通过 faction_id 引用）:
+    {core_factions_json}
+
+    已有全书核心角色（只作去重和整体平衡参考，禁止重复输出）:
+    {existing_core_characters_json}
+
+    本次必须新增角色数量: {character_count}
+    用户补充要求: {user_guidance}
+
+    硬性规则:
+    1. core_characters 数量必须严格等于本次新增数量；只生成能跨卷持续影响主线的全书级角色。
+    2. 不生成卷级、篇章级、章节级或场景级临时人物，不输出首次出场卷/章节，也不输出正式 char_ ID。
+    3. character_ref 只能使用 character_01、character_02 这类本次候选引用，并在本次结果内唯一。
+    4. 每个 core_characters 元素必须且只能包含:
+       character_ref、name、aliases、role_type、importance_level、gender、age_group、race、identity、
+       appearance、personality、core_desire、core_fear、strengths、weaknesses、abilities、
+       conflict_with_mainline、relationship_with_protagonist、initial_state、growth_direction、
+       story_function、arc_seed、tags。
+    5. role_type 只能是 protagonist/deuteragonist/antagonist/supporting/minor；
+       importance_level 只能是 core/major/supporting/background。
+    6. 每个角色都要有明确的主线冲突、故事功能与可跨全书演化的角色弧种子。
+    7. binding_candidates 必须按 character_ref 一一覆盖，每项必须完整包含:
+       character_ref、faction_id、membership_type、role_title、public_status、loyalty_level、reason。
+    8. 没有势力归属时 faction_id、membership_type、role_title、public_status、loyalty_level、reason 全部为 null。
+    9. 有势力归属时只能使用输入中的 faction_id；membership_type 只能是 primary/secondary/covert；
+       public_status、loyalty_level、reason 必须非 null，loyalty_level 为 1 到 5；role_title 允许为 null。
+
+  create_core_characters_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出核心角色与势力绑定候选，不要输出解释、Markdown、卷级字段或正式业务 ID。
+  create_core_characters_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。根字段必须且只能是 core_characters 与 binding_candidates，并严格使用以下完整结构:
+    {
+      "core_characters": [
+        {
+          "character_ref": "character_01",
+          "name": "角色名",
+          "aliases": ["别名"],
+          "role_type": "protagonist",
+          "importance_level": "core",
+          "gender": "性别描述",
+          "age_group": "年龄阶段",
+          "race": "种族或物种",
+          "identity": "身份与社会位置",
+          "appearance": "外貌特征",
+          "personality": "核心性格",
+          "core_desire": "核心欲望",
+          "core_fear": "核心恐惧",
+          "strengths": ["优势"],
+          "weaknesses": ["弱点"],
+          "abilities": ["能力"],
+          "conflict_with_mainline": "与全书主线的核心冲突",
+          "relationship_with_protagonist": "与主角的初始关系",
+          "initial_state": "故事开始时的状态",
+          "growth_direction": "跨全书成长或堕落方向",
+          "story_function": "推动主线的叙事功能",
+          "arc_seed": "可跨卷展开的角色弧种子",
+          "tags": ["标签"]
+        }
+      ],
+      "binding_candidates": [
+        {
+          "character_ref": "character_01",
+          "faction_id": null,
+          "membership_type": null,
+          "role_title": null,
+          "public_status": null,
+          "loyalty_level": null,
+          "reason": null
+        }
+      ]
+    }
+
+create_character_relations_by_ai:
+  create_character_relations_prompt_base: |
+    你是一名长篇小说人物关系架构师。请只为已经确认的全书级核心角色设计可推动主线的关系边。
+
+    小说设定:
+    {novel_profile_json}
+
+    本次可用角色（端点只能使用其中的 character_id）:
+    {characters_json}
+
+    角色当前势力绑定:
+    {faction_bindings_json}
+
+    已有活动关系（本次只能追加，禁止产生任何语义重复）:
+    {existing_relations_json}
+
+    是否允许孤立角色: {allow_isolated_characters}
+    本次关系数量上限: {relation_count_limit}
+    用户补充要求: {user_guidance}
+
+    硬性规则:
+    1. 只输出 1 到关系数量上限条全书级关系，不生成卷、篇章、章节、场景或图布局信息。
+    2. relation_ref 使用 relation_001 这类本次候选引用并保持唯一；不得输出正式 cr_ ID。
+    3. source_character_id 与 target_character_id 必须来自输入角色，禁止名称端点和自引用。
+    4. relation_type 只能使用 friend/romantic/ally/rival/enemy/parent_of/mentor_of/superior_of/protector_of/debtor_to。
+    5. friend/romantic/ally/rival/enemy 为对称关系，同一语义边不得反向重复。
+    6. 未明确允许孤立时，每个输入角色至少参与一条能推动主线的关系。
+    7. 每条候选必须完整包含 relation_ref、source_character_id、target_character_id、relation_type、
+       current_state、core_conflict、hidden_tension、possible_change、story_value、intensity、is_active。
+    8. is_active 必须为 true；只能追加新关系，禁止替换、停用、清空或覆盖任何已有关系。
+
+  create_character_relations_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 relations，不要输出解释、Markdown、卷级字段或图布局字段。
+  create_character_relations_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。根字段必须且只能是 relations，并严格使用以下完整结构:
+    {
+      "relations": [
+        {
+          "relation_ref": "relation_001",
+          "source_character_id": "char_000001",
+          "target_character_id": "char_000002",
+          "relation_type": "ally",
+          "current_state": "当前关系状态",
+          "core_conflict": "核心矛盾",
+          "hidden_tension": "深层张力",
+          "possible_change": "跨全书可能发生的变化",
+          "story_value": "推动主线的叙事价值",
+          "intensity": 4,
+          "is_active": true
+        }
+      ]
+    }

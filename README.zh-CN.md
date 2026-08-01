@@ -79,9 +79,11 @@ start.bat
 
 启动后可通过桌面启动器分别或同时启动：
 
-- 后端：`http://127.0.0.1:8000`
-- 接口文档：`http://127.0.0.1:8000/docs`
-- 前端：`http://localhost:3000`
+- 后端：`http://127.0.0.1:8200`
+- 接口文档：`http://127.0.0.1:8200/docs`
+- 前端：`http://127.0.0.1:3300`
+
+启动器顶部可以设置并持久化前后端端口，默认分别为 8200 和 3300。端口只在两个服务均停止时允许修改；启动器会同步后端 CORS、前端 API 地址和实际监听参数，并在启动前识别 Windows 排除端口。
 
 ### 方式二：手动启动后端
 
@@ -101,19 +103,27 @@ python main.py --debug
 
 ```bash
 cd frontend
-npm run dev
+npm run dev -- --hostname 127.0.0.1 --port 3300
 ```
 
 ## 测试
 
-可参考以下命令：
+数据库测试：
 
 ```bash
-python -m tests.test_volumes
-python -m tests.test_llm openai
+python -m pytest tests -q
 ```
 
-部分测试依赖本地服务或有效的大模型密钥。
+按文件运行：
+
+```bash
+python -m pytest tests/test_mongo_transaction.py -q
+python -m pytest tests/test_volumes.py -q
+python -m pytest tests/test_factions.py -q
+python -m pytest tests/test_core_factions.py -q
+```
+
+API 测试需要 `backend/config/config.yaml` 中的 MongoDB 配置可连接。
 
 ## 说明
 

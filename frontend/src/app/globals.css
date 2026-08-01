@@ -74,3 +74,34 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* 工作台名册与详情保留独立滚动能力，静止时弱化滚动条，悬停或键盘聚焦时再显示。 */
+.workspace-scrollbar {
+  overscroll-behavior: contain;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+}
+
+.workspace-scrollbar:hover,
+.workspace-scrollbar:focus-within {
+  scrollbar-color: color-mix(in srgb, var(--color-muted) 42%, transparent) transparent;
+}
+
+.workspace-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.workspace-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.workspace-scrollbar::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+}
+
+.workspace-scrollbar:hover::-webkit-scrollbar-thumb,
+.workspace-scrollbar:focus-within::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-muted) 42%, transparent);
+}

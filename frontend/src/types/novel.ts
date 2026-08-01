@@ -82,6 +82,7 @@ export interface WritingDraftRewriteState {
 
 export interface RewriteNovelFieldRequest {
   provider: string;
+  use_stream?: boolean;
   target_field: NovelRewriteFieldKey;
   instruction: string;
   current_value: string | string[];
@@ -129,6 +130,24 @@ export interface CoreFaction {
   expandability: string;
   tags: string[];
   sort_order?: number;
+  version: number;
+}
+
+export interface GeneratedCoreFaction {
+  name: string;
+  faction_type: string;
+  positioning: string;
+  public_stance: string;
+  core_goal: string;
+  hidden_goal?: string;
+  resources_and_advantages: string[];
+  organization_style: string;
+  core_values: string[];
+  conflict_with_mainline: string;
+  is_public: boolean;
+  influence_scope: string;
+  expandability: string;
+  tags: string[];
 }
 
 export interface FactionRelation {
@@ -146,6 +165,44 @@ export interface FactionRelation {
   possible_change: string;
   intensity: number;
   is_active: boolean;
+  user_is_active?: boolean;
+  version?: number;
+  is_deleted?: boolean;
+  deleted_at?: string | null;
+  deletion_sources?: string[];
+  disabled_by_faction_ids?: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** 人工创建正式阵营关系时只提交稳定的 faction_id 端点。 */
+export interface FactionRelationCreateRequestV1 {
+  source_faction_id: string;
+  target_faction_id: string;
+  relation_type: FactionRelationType;
+  current_state: string;
+  core_conflict: string;
+  hidden_tension: string;
+  possible_change: string;
+  intensity: number;
+  is_active?: boolean;
+}
+
+/** 正式阵营关系允许更新的内容字段；端点不可通过更新接口改写。 */
+export interface FactionRelationUpdateRequestV1 {
+  expected_version: number;
+  relation_type: FactionRelationType;
+  current_state: string;
+  core_conflict: string;
+  hidden_tension: string;
+  possible_change: string;
+  intensity: number;
+}
+
+/** 正式阵营关系的用户启停请求。 */
+export interface FactionRelationActiveUpdateRequestV1 {
+  expected_version: number;
+  is_active: boolean;
 }
 
 export interface GeneratedFactionRelation extends FactionRelation {
@@ -153,19 +210,52 @@ export interface GeneratedFactionRelation extends FactionRelation {
   target_faction_name: string;
 }
 
+export interface GeneratedCoreFactionRelation {
+  source_faction_name: string;
+  target_faction_name: string;
+  relation_type: FactionRelationType;
+  current_state: string;
+  core_conflict: string;
+  hidden_tension?: string;
+  possible_change: string;
+  intensity: number;
+  is_active: boolean;
+}
+
+export interface GeneratedCoreFactionsPayload {
+  core_factions: GeneratedCoreFaction[];
+  faction_relations: GeneratedCoreFactionRelation[];
+}
+
 export interface CoreFactionsPayload {
   core_factions: CoreFaction[];
   faction_relations: GeneratedFactionRelation[];
 }
 
+export interface CoreFactionsSavePayload {
+  core_factions: GeneratedCoreFaction[];
+  faction_relations: GeneratedCoreFactionRelation[];
+}
+
 export interface GenerateCoreFactionsRequest {
   novel_id: string;
+  faction_count?: number;
+  independent_faction_count?: number;
+  user_guidance?: string;
+  single_faction_integrity_score?: number | null;
+  connect_to_existing?: boolean;
+  existing_relation_targets?: Array<{
+    faction_name: string;
+    relation_score: number;
+  }>;
+  existing_relation_score?: number | null;
   temperature?: number | null;
   top_p?: number | null;
   max_tokens?: number | null;
   presence_penalty?: number | null;
   frequency_penalty?: number | null;
   system_prompt?: string | null;
+  use_stream?: boolean;
 }
 
 export interface BulkCreateCoreFactionsResponse {
@@ -185,6 +275,7 @@ export interface AICreateRequest {
   presence_penalty?: number | null;
   frequency_penalty?: number | null;
   system_prompt?: string | null;
+  use_stream?: boolean;
 }
 
 export interface AICreateStepResult {

@@ -184,13 +184,12 @@ class CoreFactionsResultSchema(BaseModel):
 
     core_factions: list[CoreFactionSchema] = Field(
         ...,
-        min_length=2,
+        min_length=1,
         max_length=6,
         description="全书级核心阵营列表",
     )
     faction_relations: list[CoreFactionRelationSchema] = Field(
-        ...,
-        min_length=1,
+        default_factory=list,
         max_length=20,
         description="核心阵营之间的关系列表",
     )
@@ -206,27 +205,15 @@ class CoreFactionsResultSchema(BaseModel):
             校验通过后的当前模型。
 
         Raises:
-            ValueError: 阵营名称重复、关系引用不存在或缺少关键关系类型时抛出。
+            ValueError: 阵营名称重复或关系自引用时抛出。
         """
         faction_names = [faction.name for faction in self.core_factions]
         if len(faction_names) != len(set(faction_names)):
             raise ValueError("核心阵营名称不能重复")
 
-        faction_name_set = set(faction_names)
-        relation_types = {relation.relation_type for relation in self.faction_relations}
-        complex_types = {"cold_war", "secret_cooperation", "historical_enemy", "dependent"}
-
         for relation in self.faction_relations:
-            if relation.source_faction_name not in faction_name_set:
-                raise ValueError(f"关系发起方阵营不存在: {relation.source_faction_name}")
-            if relation.target_faction_name not in faction_name_set:
-                raise ValueError(f"关系目标方阵营不存在: {relation.target_faction_name}")
+            # 关系端点可能引用已保存阵营，存在性在服务层结合数据库状态校验。
             if relation.source_faction_name == relation.target_faction_name:
                 raise ValueError("阵营关系不能指向自身")
-
-        if "hostile" not in relation_types and "historical_enemy" not in relation_types:
-            raise ValueError("核心阵营关系至少需要一组对立或历史敌对关系")
-        if relation_types.isdisjoint(complex_types):
-            raise ValueError("核心阵营关系至少需要一组复杂关系")
 
         return self

@@ -11,18 +11,22 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from backend.db.errors import InvalidIdError, NotFoundError
 from backend.db.repositories.novel_repository import novel_repo
 from backend.llm.config import get_llm_config, get_provider_config
 from backend.services.llm.workflow_service import (
+    build_generation_kwargs,
+    generate_structured_result,
     get_llm_service_for_step,
+    provider_supports_json_schema,
     resolve_provider_for_step,
     resolve_timeout_for_step,
+    should_use_streaming,
+    stream_structured_result_events,
 )
 from backend.services.llm.llm_service import LLMService
-from backend.services.llm.format_review_service import validate_and_fix_format
 from backend.services.novel.faction_service import FactionService
 from backend.llm.prompts.prompt_selector import (
     CORE_FACTIONS_PROMPT_NAME,
@@ -125,15 +129,27 @@ def _load_prompts() -> dict:
 
 def _check_json_schema_support(step_name: str, workflow_name: str = WORKFLOW_NAME) -> bool:
     """检查指定步骤对应的 Provider 是否支持 JSON Schema 输出。"""
-    provider = resolve_provider_for_step(workflow_name, step_name)
-    if not provider:
-        return False
-    return get_provider_config(provider).supports_json_schema
+    provider = resolve_provider_for_step(workflow_name, step_name) or ""
+    return provider_supports_json_schema(provider)
 
 
 def _sse_event(event: str, data: dict) -> str:
     """格式化一条 SSE 事件。"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _sse_response(event_stream: AsyncGenerator[str, None]) -> StreamingResponse:
+    """构造统一的 SSE 响应。
+    Args:
+        event_stream: 已格式化 SSE 文本的异步生成器。
+    Returns:
+        带禁用缓冲响应头的 StreamingResponse。
+    """
+    return StreamingResponse(
+        event_stream,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _log_workflow_event(request_id: str, step: str, status: str, **details: object) -> None:
@@ -236,6 +252,7 @@ class AICreateNovelRequest(BaseModel):
     number_of_chapters: int = 100
     words_per_chapter: int = 3000
     cached_steps: AICreateCachedSteps | None = None
+    use_stream: bool = True
     # 可选生成参数，前端传入时覆盖 provider 级别默认值
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
@@ -243,16 +260,6 @@ class AICreateNovelRequest(BaseModel):
     presence_penalty: float | None = Field(default=None, ge=-2, le=2)
     frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
     system_prompt: str | None = Field(default=None)
-
-
-def _build_gen_kwargs(req: Any) -> dict:
-    """从请求中提取非空的生成参数，用于传入 LLMService。"""
-    kwargs: dict = {}
-    for key in ("temperature", "top_p", "max_tokens", "presence_penalty", "frequency_penalty", "system_prompt"):
-        val = getattr(req, key)
-        if val is not None:
-            kwargs[key] = val
-    return kwargs
 
 
 class NovelRewriteChatMessage(BaseModel):
@@ -271,6 +278,7 @@ class NovelFieldRewriteRequest(BaseModel):
     current_value: str | list[str] = ""
     context: dict[str, Any] = Field(default_factory=dict)
     chat_history: list[NovelRewriteChatMessage] = Field(default_factory=list)
+    use_stream: bool = True
 
 
 class NovelFieldRewriteResult(BaseModel):
@@ -280,16 +288,51 @@ class NovelFieldRewriteResult(BaseModel):
     value: str | list[str]
 
 
+class ExistingFactionRelationTarget(BaseModel):
+    """单个已有阵营关系目标配置。"""
+
+    faction_name: str = Field(..., min_length=1, max_length=80)
+    relation_score: int = Field(..., ge=0, le=10)
+
+
 class GenerateCoreFactionsRequest(BaseModel):
     """基于已保存小说生成核心阵营预览的请求。"""
 
     novel_id: str = Field(..., min_length=1)
+    faction_count: int = Field(default=3, ge=1, le=6)
+    independent_faction_count: int = Field(default=0, ge=0, le=6)
+    user_guidance: str = Field(default="", max_length=2000)
+    single_faction_integrity_score: int | None = Field(default=None, ge=0, le=10)
+    connect_to_existing: bool = Field(default=False)
+    existing_relation_targets: list[ExistingFactionRelationTarget] = Field(default_factory=list, max_length=12)
+    existing_relation_score: int | None = Field(default=None, ge=0, le=10)
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
     max_tokens: int | None = Field(default=None, gt=0)
     presence_penalty: float | None = Field(default=None, ge=-2, le=2)
     frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
     system_prompt: str | None = Field(default=None)
+    use_stream: bool = True
+
+    @model_validator(mode="after")
+    def validate_generation_counts(self) -> "GenerateCoreFactionsRequest":
+        """校验核心阵营生成数量之间的约束。
+
+        Args:
+            无。
+
+        Returns:
+            校验通过后的请求模型。
+
+        Raises:
+            ValueError: 完全独立势力数量大于本次生成总数时抛出。
+        """
+        if self.independent_faction_count > self.faction_count:
+            raise ValueError("完全独立势力数量不能大于本次创建势力数量")
+        target_names = [target.faction_name.strip() for target in self.existing_relation_targets if target.faction_name.strip()]
+        if len(target_names) != len(set(target_names)):
+            raise ValueError("需要产生联系的已有阵营不能重复")
+        return self
 
 
 def _validate_rewrite_provider(provider: str):
@@ -489,11 +532,159 @@ def _safe_novel_text(novel: dict[str, Any], field: str, fallback: str = "未提�
     return text or fallback
 
 
-def _build_core_factions_prompt(novel: dict[str, Any], *, use_json_schema: bool) -> str:
+def _compact_existing_core_factions(factions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """压缩已有核心阵营为提示词可读的低噪声结构。
+
+    Args:
+        factions: 数据库中已保存且未删除的核心阵营列表。
+
+    Returns:
+        只保留名称、类型和主线相关信息的阵营摘要列表。
+    """
+    compacted: list[dict[str, Any]] = []
+    for faction in factions:
+        compacted.append(
+            {
+                "name": faction.get("name", ""),
+                "faction_type": faction.get("faction_type", ""),
+                "positioning": faction.get("positioning", ""),
+                "public_stance": faction.get("public_stance", ""),
+                "core_goal": faction.get("core_goal", ""),
+                "hidden_goal": faction.get("hidden_goal", ""),
+                "influence_scope": faction.get("influence_scope", ""),
+                "tags": faction.get("tags", []),
+            }
+        )
+    return compacted
+
+
+def _describe_integrity_score(score: int) -> str:
+    """解释单个阵营正直度滑块的生成含义。
+
+    Args:
+        score: 0 到 10 的正直度分值。
+
+    Returns:
+        可直接放入提示词的正直度说明。
+    """
+    negative_feature_count = max(0, 10 - score)
+    if score == 0:
+        stance = "绝对负面，可设计为扁平化反派势力，核心特征全部服务压迫、掠夺或破坏。"
+    elif score == 10:
+        stance = "绝对正面，可设计为扁平化正派势力，不安排明显负面特征。"
+    elif score < 5:
+        stance = "整体偏负面，但需要保留少量可理解动机或秩序逻辑。"
+    elif score > 5:
+        stance = "整体偏正面，但需要安排相对负面的代价、盲区或内部问题。"
+    else:
+        stance = "正负面相对均衡，需要同时具备建设性目标和明显问题。"
+    return f"正直度为 {score}/10。{stance} 相对负面特征数量参考 {negative_feature_count} 项。"
+
+
+def _describe_relation_score(score: int) -> str:
+    """解释单个阵营与已有阵营关系滑块的生成含义。
+
+    Args:
+        score: 0 到 10 的关系量化分值。
+
+    Returns:
+        可直接放入提示词的关系倾向说明。
+    """
+    if score == 0:
+        return "关系量化为 0/10：应设计为绝对决裂或不可调和敌对。"
+    if score == 10:
+        return "关系量化为 10/10：应设计为高度互信、稳定伙伴或同盟。"
+    if score < 5:
+        return f"关系量化为 {score}/10：关系偏差，越接近 0 越应体现敌意、竞争、背叛风险或旧怨。"
+    if score > 5:
+        return f"关系量化为 {score}/10：关系偏好，越接近 10 越应体现合作、利益绑定或共同目标。"
+    return "关系量化为 5/10：关系中性或摇摆，合作与冲突并存。"
+
+
+def _format_existing_relation_targets(targets: list[ExistingFactionRelationTarget]) -> str:
+    """格式化用户手动选择的已有阵营关系目标。
+
+    Args:
+        targets: 已有阵营名称与独立关系分值配置列表。
+
+    Returns:
+        可放入提示词的多行目标说明。
+    """
+    lines: list[str] = []
+    for target in targets:
+        faction_name = target.faction_name.strip()
+        if faction_name:
+            lines.append(f"{faction_name}: {_describe_relation_score(target.relation_score)}")
+    return "\n".join(lines)
+
+
+def _build_core_factions_generation_strategy(
+    req: GenerateCoreFactionsRequest,
+    existing_core_factions: list[dict[str, Any]],
+) -> str:
+    """构造核心阵营追加生成策略说明。
+
+    Args:
+        req: 前端提交的核心阵营生成参数。
+        existing_core_factions: 数据库中已保存且未删除的核心阵营列表。
+
+    Returns:
+        可拼接进提示词的生成约束说明。
+    """
+    independent_count = req.independent_faction_count
+    user_guidance = req.user_guidance.strip() or "无"
+    has_existing = len(existing_core_factions) > 0
+    lines = [
+        f"本次必须只生成 {req.faction_count} 个全新的核心阵营。",
+        "已有核心阵营只作为上下文和关系端点参考，禁止把已有阵营重复放入 core_factions。",
+        "新阵营名称不得与已有核心阵营重复。",
+        "每条新关系至少要连接一个本次生成的新阵营；可以连接新阵营和已有阵营，也可以连接两个本次新阵营。",
+        f"用户指导: {user_guidance}",
+    ]
+
+    if independent_count > 0:
+        lines.append(
+            f"其中 {independent_count} 个新阵营必须是完全独立势力，不与本次其他阵营或已有阵营产生 faction_relations。"
+        )
+    else:
+        lines.append("本次没有强制完全独立势力，非独立新阵营应优先设计可写入的阵营关系。")
+
+    if req.faction_count == 1:
+        integrity_score = req.single_faction_integrity_score if req.single_faction_integrity_score is not None else 5
+        lines.append(_describe_integrity_score(integrity_score))
+        can_connect_to_existing = independent_count == 0 and req.connect_to_existing and has_existing
+        if can_connect_to_existing:
+            formatted_targets = _format_existing_relation_targets(req.existing_relation_targets)
+            if formatted_targets:
+                lines.append("这个单个新阵营需要分别与以下用户选定的已有核心阵营产生关系，并按每个阵营的独立分值设计关系。")
+                lines.append(formatted_targets)
+            else:
+                relation_score = req.existing_relation_score if req.existing_relation_score is not None else 5
+                lines.append("这个单个新阵营需要与至少一个已有核心阵营产生关系。")
+                lines.append(_describe_relation_score(relation_score))
+        else:
+            lines.append("这个单个新阵营不强制与已有阵营建立关系，必要时 faction_relations 可以为空数组。")
+    elif has_existing:
+        lines.append("已有核心阵营存在时，非独立新阵营可以优先与已有核心阵营建立关系，补足追加生成的连贯性。")
+    else:
+        lines.append("当前没有已有核心阵营，关系只能在本次新生成阵营之间建立。")
+
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _build_core_factions_prompt(
+    novel: dict[str, Any],
+    req: GenerateCoreFactionsRequest,
+    existing_core_factions: list[dict[str, Any]],
+    *,
+    use_json_schema: bool,
+) -> str:
     """构造全书核心阵营生成提示词。
 
     Args:
         novel: 已落库小说文档。
+        req: 前端提交的核心阵营生成参数。
+        existing_core_factions: 数据库中已保存且未删除的核心阵营列表。
         use_json_schema: 当前 Provider 是否支持结构化输出。
 
     Returns:
@@ -522,8 +713,106 @@ def _build_core_factions_prompt(novel: dict[str, Any], *, use_json_schema: bool)
         narrative_pov=_safe_novel_text(novel, "narrative_pov"),
         era_background=_safe_novel_text(novel, "era_background"),
         tags_json=json.dumps(tags, ensure_ascii=False),
+        existing_core_factions_json=json.dumps(
+            _compact_existing_core_factions(existing_core_factions),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        faction_count=req.faction_count,
+        generation_strategy=_build_core_factions_generation_strategy(req, existing_core_factions),
     )
     return f"{prompt_base}\n{prompts[suffix_key]}".strip()
+
+
+async def _prepare_core_factions_generation(
+    req: GenerateCoreFactionsRequest,
+) -> tuple[dict[str, Any], list[dict[str, Any]], str, int | None, bool, dict[str, Any]]:
+    """准备核心阵营生成所需的小说、Provider 与提示词参数。
+    Args:
+        req: 前端提交的核心阵营生成请求。
+    Returns:
+        小说文档、已有核心阵营、Provider 别名、步骤超时、JSON Schema 能力和生成参数。
+    Raises:
+        HTTPException: 小说不存在、ID 非法或指定的已有阵营不存在时抛出。
+    """
+    try:
+        novel = await novel_repo.get_novel_by_id(req.novel_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except InvalidIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    existing_core_factions = await FactionService.get_factions_by_level_type(req.novel_id, "core")
+    existing_names = {str(faction.get("name", "")).strip() for faction in existing_core_factions}
+    unknown_targets = [
+        target.faction_name.strip()
+        for target in req.existing_relation_targets
+        if target.faction_name.strip() and target.faction_name.strip() not in existing_names
+    ]
+    if unknown_targets:
+        raise HTTPException(status_code=400, detail=f"指定的已有阵营不存在: {', '.join(unknown_targets)}")
+
+    step_name = CREATE_CORE_FACTIONS_STEP_NAME
+    return (
+        novel,
+        existing_core_factions,
+        resolve_provider_for_step(FACTIONS_WORKFLOW_NAME, step_name) or "",
+        resolve_timeout_for_step(FACTIONS_WORKFLOW_NAME, step_name),
+        _check_json_schema_support(step_name, FACTIONS_WORKFLOW_NAME),
+        build_generation_kwargs(req),
+    )
+
+
+async def _generate_core_factions_result(req: GenerateCoreFactionsRequest) -> CoreFactionsResultSchema:
+    """执行非流式核心阵营生成并返回已校验结果。
+    Args:
+        req: 核心阵营生成请求。
+    Returns:
+        已通过 CoreFactionsResultSchema 校验的生成结果。
+    """
+    (
+        novel,
+        existing_core_factions,
+        _provider,
+        _timeout_seconds,
+        use_json_schema,
+        gen_kwargs,
+    ) = await _prepare_core_factions_generation(req)
+    prompt = _build_core_factions_prompt(
+        novel,
+        req,
+        existing_core_factions,
+        use_json_schema=use_json_schema,
+    )
+    service = get_llm_service_for_step(FACTIONS_WORKFLOW_NAME, CREATE_CORE_FACTIONS_STEP_NAME)
+    return await generate_structured_result(
+        service,
+        prompt,
+        CoreFactionsResultSchema,
+        CREATE_CORE_FACTIONS_STEP_NAME,
+        gen_kwargs=gen_kwargs,
+        use_json_schema=use_json_schema,
+    )
+
+
+async def _rewrite_novel_field_result(req: NovelFieldRewriteRequest) -> NovelFieldRewriteResult:
+    """执行非流式小说字段改写并返回归一化结果。
+    Args:
+        req: 前端提交的字段改写请求。
+    Returns:
+        字段一致且字段值已归一化的改写结果。
+    """
+    provider_config = _validate_rewrite_provider(req.provider)
+    prompt = _build_rewrite_prompt(req, use_json_schema=provider_config.supports_json_schema)
+    service = LLMService(provider_name=req.provider)
+    raw_result = await generate_structured_result(
+        service,
+        prompt,
+        NovelFieldRewriteResult,
+        "rewrite_novel_field",
+        use_json_schema=provider_config.supports_json_schema,
+    )
+    return _normalize_rewrite_result(req.target_field, raw_result)
 
 
 @router.post("/generate-core-factions")
@@ -537,39 +826,28 @@ async def generate_core_factions(req: GenerateCoreFactionsRequest):
         包含 core_factions 与 faction_relations 的预览结果。
     """
     request_id = uuid4().hex[:8]
-    try:
-        novel = await novel_repo.get_novel_by_id(req.novel_id)
-    except NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except InvalidIdError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    if await FactionService.has_core_factions_initialized(req.novel_id):
-        raise HTTPException(status_code=409, detail="核心阵营已初始化，请改用手动新增或先清空核心势力与垃圾桶")
-
     step_name = CREATE_CORE_FACTIONS_STEP_NAME
     provider = resolve_provider_for_step(FACTIONS_WORKFLOW_NAME, step_name) or ""
     timeout_seconds = resolve_timeout_for_step(FACTIONS_WORKFLOW_NAME, step_name)
-    use_json_schema = _check_json_schema_support(step_name, FACTIONS_WORKFLOW_NAME)
-    gen_kwargs = _build_gen_kwargs(req)
-    prompt = _build_core_factions_prompt(novel, use_json_schema=use_json_schema)
 
     logger.info(
-        "[generate_core_factions] request_id=%s novel_id=%s provider=%s json_schema=%s",
+        "[generate_core_factions] request_id=%s novel_id=%s provider=%s count=%s",
         request_id,
         req.novel_id,
         provider or "unresolved",
-        use_json_schema,
+        req.faction_count,
     )
 
     try:
-        service = get_llm_service_for_step(FACTIONS_WORKFLOW_NAME, step_name)
-        if use_json_schema:
-            raw_result = await service.generate_structured(prompt, CoreFactionsResultSchema, **gen_kwargs)
-        else:
-            raw_text = await service.generate_text(prompt, **gen_kwargs)
-            raw_result = await validate_and_fix_format(raw_text, CoreFactionsResultSchema, step_name)
-        parsed_result = CoreFactionsResultSchema.model_validate(raw_result.model_dump())
-        return parsed_result.model_dump()
+        result = await _generate_core_factions_result(req)
+        return result.model_dump()
+    except HTTPException:
+        # 准备阶段已将小说不存在、非法 ID 和未知阵营映射为明确的客户端错误。
+        raise
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         logger.warning(
             "[generate_core_factions] request_id=%s invalid_result=%s",
@@ -587,6 +865,92 @@ async def generate_core_factions(req: GenerateCoreFactionsRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/generate-core-factions/stream")
+async def generate_core_factions_stream(req: GenerateCoreFactionsRequest):
+    """通过 SSE 生成核心阵营预览，支持 Provider 流式保活。
+    Args:
+        req: 核心阵营生成请求，use_stream 为 true 且 Provider 支持时启用流式接口。
+    Returns:
+        SSE 响应；progress 事件只表示保活进度，done 事件返回最终结构化结果。
+    """
+    (
+        novel,
+        existing_core_factions,
+        provider,
+        timeout_seconds,
+        use_json_schema,
+        gen_kwargs,
+    ) = await _prepare_core_factions_generation(req)
+    request_id = uuid4().hex[:8]
+    should_stream = should_use_streaming(req, provider)
+    service = get_llm_service_for_step(FACTIONS_WORKFLOW_NAME, CREATE_CORE_FACTIONS_STEP_NAME)
+    prompt = _build_core_factions_prompt(
+        novel,
+        req,
+        existing_core_factions,
+        use_json_schema=False if should_stream else use_json_schema,
+    )
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        logger.info(
+            "[generate_core_factions_stream] request_id=%s provider=%s stream=%s timeout=%s",
+            request_id,
+            provider or "unresolved",
+            should_stream,
+            timeout_seconds,
+        )
+        try:
+            if should_stream:
+                async for event in stream_structured_result_events(
+                    service,
+                    prompt,
+                    CoreFactionsResultSchema,
+                    CREATE_CORE_FACTIONS_STEP_NAME,
+                    gen_kwargs=gen_kwargs,
+                ):
+                    if event["status"] == "progress":
+                        yield _sse_event(
+                            "progress",
+                            {
+                                "status": "progress",
+                                "step": CREATE_CORE_FACTIONS_STEP_NAME,
+                                "chunk_count": event["chunk_count"],
+                                "characters": event["characters"],
+                            },
+                        )
+                    else:
+                        parsed_result = CoreFactionsResultSchema.model_validate(event["result"].model_dump())
+                        yield _sse_event("done", {"success": True, "result": parsed_result.model_dump()})
+                return
+
+            raw_result = await generate_structured_result(
+                service,
+                prompt,
+                CoreFactionsResultSchema,
+                CREATE_CORE_FACTIONS_STEP_NAME,
+                gen_kwargs=gen_kwargs,
+                use_json_schema=use_json_schema,
+            )
+            parsed_result = CoreFactionsResultSchema.model_validate(raw_result.model_dump())
+            yield _sse_event("done", {"success": True, "result": parsed_result.model_dump()})
+        except ValueError as exc:
+            logger.warning(
+                "[generate_core_factions_stream] request_id=%s invalid_result=%s",
+                request_id,
+                exc,
+            )
+            yield _sse_event("error", {"success": False, "status_code": 502, "error": str(exc)})
+        except Exception as exc:
+            logger.exception(
+                "[generate_core_factions_stream] request_id=%s failed provider=%s",
+                request_id,
+                provider or "unresolved",
+            )
+            yield _sse_event("error", {"success": False, "status_code": 500, "error": str(exc)})
+
+    return _sse_response(event_stream())
+
+
 @router.post("/rewrite-novel-field")
 async def rewrite_novel_field(req: NovelFieldRewriteRequest):
     """使用指定 Provider 改写创建态小说信息中的单个字段。
@@ -598,7 +962,6 @@ async def rewrite_novel_field(req: NovelFieldRewriteRequest):
         包含目标字段和改写后字段值的响应字典。
     """
     provider_config = _validate_rewrite_provider(req.provider)
-    prompt = _build_rewrite_prompt(req, use_json_schema=provider_config.supports_json_schema)
     request_id = uuid4().hex[:8]
     logger.info(
         "[rewrite_novel_field] request_id=%s provider=%s field=%s json_schema=%s",
@@ -609,19 +972,7 @@ async def rewrite_novel_field(req: NovelFieldRewriteRequest):
     )
 
     try:
-        service = LLMService(provider_name=req.provider)
-        if provider_config.supports_json_schema:
-            raw_result = await service.generate_structured(prompt, NovelFieldRewriteResult)
-        else:
-            raw_text = await service.generate_text(prompt)
-            raw_result = await validate_and_fix_format(
-                raw_text,
-                NovelFieldRewriteResult,
-                "rewrite_novel_field",
-            )
-
-        parsed_result = NovelFieldRewriteResult.model_validate(raw_result.model_dump())
-        normalized_result = _normalize_rewrite_result(req.target_field, parsed_result)
+        normalized_result = await _rewrite_novel_field_result(req)
         return normalized_result.model_dump()
     except HTTPException:
         raise
@@ -642,6 +993,83 @@ async def rewrite_novel_field(req: NovelFieldRewriteRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/rewrite-novel-field/stream")
+async def rewrite_novel_field_stream(req: NovelFieldRewriteRequest):
+    """通过 SSE 改写创建态小说字段，支持 Provider 流式保活。
+    Args:
+        req: 字段改写请求，use_stream 为 true 且 Provider 支持时启用流式接口。
+    Returns:
+        SSE 响应；progress 事件只表示保活进度，done 事件返回最终字段改写结果。
+    """
+    provider_config = _validate_rewrite_provider(req.provider)
+    request_id = uuid4().hex[:8]
+    should_stream = should_use_streaming(req, req.provider)
+    prompt = _build_rewrite_prompt(
+        req,
+        use_json_schema=False if should_stream else provider_config.supports_json_schema,
+    )
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        logger.info(
+            "[rewrite_novel_field_stream] request_id=%s provider=%s field=%s stream=%s",
+            request_id,
+            req.provider,
+            req.target_field,
+            should_stream,
+        )
+        try:
+            service = LLMService(provider_name=req.provider)
+            if should_stream:
+                async for event in stream_structured_result_events(
+                    service,
+                    prompt,
+                    NovelFieldRewriteResult,
+                    "rewrite_novel_field",
+                ):
+                    if event["status"] == "progress":
+                        yield _sse_event(
+                            "progress",
+                            {
+                                "status": "progress",
+                                "field": req.target_field,
+                                "chunk_count": event["chunk_count"],
+                                "characters": event["characters"],
+                            },
+                        )
+                    else:
+                        parsed_result = NovelFieldRewriteResult.model_validate(event["result"].model_dump())
+                        normalized_result = _normalize_rewrite_result(req.target_field, parsed_result)
+                        yield _sse_event("done", {"success": True, "result": normalized_result.model_dump()})
+                return
+
+            raw_result = await generate_structured_result(
+                service,
+                prompt,
+                NovelFieldRewriteResult,
+                "rewrite_novel_field",
+                use_json_schema=provider_config.supports_json_schema,
+            )
+            normalized_result = _normalize_rewrite_result(req.target_field, raw_result)
+            yield _sse_event("done", {"success": True, "result": normalized_result.model_dump()})
+        except ValueError as exc:
+            logger.warning(
+                "[rewrite_novel_field_stream] request_id=%s invalid_result=%s",
+                request_id,
+                exc,
+            )
+            yield _sse_event("error", {"success": False, "status_code": 502, "error": str(exc)})
+        except Exception as exc:
+            logger.exception(
+                "[rewrite_novel_field_stream] request_id=%s failed provider=%s field=%s",
+                request_id,
+                req.provider,
+                req.target_field,
+            )
+            yield _sse_event("error", {"success": False, "status_code": 500, "error": str(exc)})
+
+    return _sse_response(event_stream())
+
+
 @router.post("/create-novel-by-ai")
 async def create_novel_by_ai(req: AICreateNovelRequest):
     """4 步 LLM 管道（SSE 流式）：expand_idea → extract_idea → core_seed → novel_meta。
@@ -657,7 +1085,7 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
         request_id = uuid4().hex[:8]
         workflow_start = time.perf_counter()
         prompts = _load_prompts().get("create_novel_by_ai", {})
-        gen_kwargs = _build_gen_kwargs(req)
+        gen_kwargs = build_generation_kwargs(req)
         cached_prefix = _get_contiguous_cached_steps(req.cached_steps)
         expanded: ExpandIdeaSchema | None = None
         idea: ExtractIdeaSchema | None = None
@@ -685,6 +1113,7 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
             provider0 = resolve_provider_for_step(WORKFLOW_NAME, "expand_idea_to_full_novel_story") or ""
             timeout0 = resolve_timeout_for_step(WORKFLOW_NAME, "expand_idea_to_full_novel_story")
             use_schema0 = _check_json_schema_support("expand_idea_to_full_novel_story")
+            use_stream0 = should_use_streaming(req, provider0)
             _log_workflow_event(
                 request_id,
                 "expand_idea",
@@ -692,10 +1121,11 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                 provider=provider0 or "unresolved",
                 timeout_seconds=timeout0,
                 json_schema=use_schema0,
+                stream=use_stream0,
             )
             try:
                 svc0 = get_llm_service_for_step(WORKFLOW_NAME, "expand_idea_to_full_novel_story")
-                suffix0 = "expand_idea_to_full_novel_story_prompt_with_schema_suffix" if use_schema0 else "expand_idea_to_full_novel_story_prompt_without_schema_suffix"
+                suffix0 = "expand_idea_to_full_novel_story_prompt_without_schema_suffix" if use_stream0 else ("expand_idea_to_full_novel_story_prompt_with_schema_suffix" if use_schema0 else "expand_idea_to_full_novel_story_prompt_without_schema_suffix")
                 prompt0 = (
                     prompts["expand_idea_to_full_novel_story_prompt_base"].format(
                         user_idea=req.user_idea,
@@ -703,11 +1133,35 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                     + "\n"
                     + prompts[suffix0]
                 )
-                if use_schema0:
-                    expanded = await svc0.generate_structured(prompt0, ExpandIdeaSchema, **gen_kwargs)
+                if use_stream0:
+                    async for event in stream_structured_result_events(
+                        svc0,
+                        prompt0,
+                        ExpandIdeaSchema,
+                        "expand_idea_to_full_novel_story",
+                        gen_kwargs=gen_kwargs,
+                    ):
+                        if event["status"] == "progress":
+                            yield _sse_event(
+                                "progress",
+                                {
+                                    "step": "expand_idea",
+                                    "status": "progress",
+                                    "chunk_count": event["chunk_count"],
+                                    "characters": event["characters"],
+                                },
+                            )
+                        else:
+                            expanded = event["result"]
                 else:
-                    raw0 = await svc0.generate_text(prompt0, **gen_kwargs)
-                    expanded = await validate_and_fix_format(raw0, ExpandIdeaSchema, "expand_idea_to_full_novel_story")
+                    expanded = await generate_structured_result(
+                        svc0,
+                        prompt0,
+                        ExpandIdeaSchema,
+                        "expand_idea_to_full_novel_story",
+                        gen_kwargs=gen_kwargs,
+                        use_json_schema=use_schema0,
+                    )
                 _log_workflow_event(
                     request_id,
                     "expand_idea",
@@ -738,6 +1192,7 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
             provider1 = resolve_provider_for_step(WORKFLOW_NAME, "extract_idea") or ""
             timeout1 = resolve_timeout_for_step(WORKFLOW_NAME, "extract_idea")
             use_schema1 = _check_json_schema_support("extract_idea")
+            use_stream1 = should_use_streaming(req, provider1)
             _log_workflow_event(
                 request_id,
                 "extract_idea",
@@ -745,10 +1200,11 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                 provider=provider1 or "unresolved",
                 timeout_seconds=timeout1,
                 json_schema=use_schema1,
+                stream=use_stream1,
             )
             try:
                 svc1 = get_llm_service_for_step(WORKFLOW_NAME, "extract_idea")
-                suffix1 = "extract_idea_prompt_with_schema_suffix" if use_schema1 else "extract_idea_prompt_without_schema_suffix"
+                suffix1 = "extract_idea_prompt_without_schema_suffix" if use_stream1 else ("extract_idea_prompt_with_schema_suffix" if use_schema1 else "extract_idea_prompt_without_schema_suffix")
                 prompt1 = (
                     prompts["extract_idea_prompt_base"].format(
                         plot=expanded.plot,
@@ -756,11 +1212,35 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                     + "\n"
                     + prompts[suffix1]
                 )
-                if use_schema1:
-                    idea = await svc1.generate_structured(prompt1, ExtractIdeaSchema, **gen_kwargs)
+                if use_stream1:
+                    async for event in stream_structured_result_events(
+                        svc1,
+                        prompt1,
+                        ExtractIdeaSchema,
+                        "extract_idea",
+                        gen_kwargs=gen_kwargs,
+                    ):
+                        if event["status"] == "progress":
+                            yield _sse_event(
+                                "progress",
+                                {
+                                    "step": "extract_idea",
+                                    "status": "progress",
+                                    "chunk_count": event["chunk_count"],
+                                    "characters": event["characters"],
+                                },
+                            )
+                        else:
+                            idea = event["result"]
                 else:
-                    raw1 = await svc1.generate_text(prompt1, **gen_kwargs)
-                    idea = await validate_and_fix_format(raw1, ExtractIdeaSchema, "extract_idea")
+                    idea = await generate_structured_result(
+                        svc1,
+                        prompt1,
+                        ExtractIdeaSchema,
+                        "extract_idea",
+                        gen_kwargs=gen_kwargs,
+                        use_json_schema=use_schema1,
+                    )
                 _log_workflow_event(
                     request_id,
                     "extract_idea",
@@ -791,6 +1271,7 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
             provider2 = resolve_provider_for_step(WORKFLOW_NAME, "core_seed") or ""
             timeout2 = resolve_timeout_for_step(WORKFLOW_NAME, "core_seed")
             use_schema2 = _check_json_schema_support("core_seed")
+            use_stream2 = should_use_streaming(req, provider2)
             _log_workflow_event(
                 request_id,
                 "core_seed",
@@ -798,10 +1279,11 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                 provider=provider2 or "unresolved",
                 timeout_seconds=timeout2,
                 json_schema=use_schema2,
+                stream=use_stream2,
             )
             try:
                 svc2 = get_llm_service_for_step(WORKFLOW_NAME, "core_seed")
-                suffix2 = "core_seed_prompt_with_schema_suffix" if use_schema2 else "core_seed_prompt_without_schema_suffix"
+                suffix2 = "core_seed_prompt_without_schema_suffix" if use_stream2 else ("core_seed_prompt_with_schema_suffix" if use_schema2 else "core_seed_prompt_without_schema_suffix")
                 prompt2 = (
                     prompts["core_seed_prompt_base"].format(
                         plot=expanded.plot,
@@ -815,11 +1297,35 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                     + "\n"
                     + prompts[suffix2]
                 )
-                if use_schema2:
-                    seed = await svc2.generate_structured(prompt2, CoreSeedSchema, **gen_kwargs)
+                if use_stream2:
+                    async for event in stream_structured_result_events(
+                        svc2,
+                        prompt2,
+                        CoreSeedSchema,
+                        "core_seed",
+                        gen_kwargs=gen_kwargs,
+                    ):
+                        if event["status"] == "progress":
+                            yield _sse_event(
+                                "progress",
+                                {
+                                    "step": "core_seed",
+                                    "status": "progress",
+                                    "chunk_count": event["chunk_count"],
+                                    "characters": event["characters"],
+                                },
+                            )
+                        else:
+                            seed = event["result"]
                 else:
-                    raw2 = await svc2.generate_text(prompt2, **gen_kwargs)
-                    seed = await validate_and_fix_format(raw2, CoreSeedSchema, "core_seed")
+                    seed = await generate_structured_result(
+                        svc2,
+                        prompt2,
+                        CoreSeedSchema,
+                        "core_seed",
+                        gen_kwargs=gen_kwargs,
+                        use_json_schema=use_schema2,
+                    )
                 _log_workflow_event(
                     request_id,
                     "core_seed",
@@ -850,6 +1356,7 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
             provider3 = resolve_provider_for_step(WORKFLOW_NAME, "novel_meta") or ""
             timeout3 = resolve_timeout_for_step(WORKFLOW_NAME, "novel_meta")
             use_schema3 = _check_json_schema_support("novel_meta")
+            use_stream3 = should_use_streaming(req, provider3)
             _log_workflow_event(
                 request_id,
                 "novel_meta",
@@ -857,10 +1364,11 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                 provider=provider3 or "unresolved",
                 timeout_seconds=timeout3,
                 json_schema=use_schema3,
+                stream=use_stream3,
             )
             try:
                 svc3 = get_llm_service_for_step(WORKFLOW_NAME, "novel_meta")
-                suffix3 = "novel_meta_prompt_with_schema_suffix" if use_schema3 else "novel_meta_prompt_without_schema_suffix"
+                suffix3 = "novel_meta_prompt_without_schema_suffix" if use_stream3 else ("novel_meta_prompt_with_schema_suffix" if use_schema3 else "novel_meta_prompt_without_schema_suffix")
                 prompt3 = (
                     prompts["novel_meta_prompt_base"].format(
                         plot=expanded.plot,
@@ -875,11 +1383,35 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                     + "\n"
                     + prompts[suffix3]
                 )
-                if use_schema3:
-                    meta = await svc3.generate_structured(prompt3, NovelMetaSchema, **gen_kwargs)
+                if use_stream3:
+                    async for event in stream_structured_result_events(
+                        svc3,
+                        prompt3,
+                        NovelMetaSchema,
+                        "novel_meta",
+                        gen_kwargs=gen_kwargs,
+                    ):
+                        if event["status"] == "progress":
+                            yield _sse_event(
+                                "progress",
+                                {
+                                    "step": "novel_meta",
+                                    "status": "progress",
+                                    "chunk_count": event["chunk_count"],
+                                    "characters": event["characters"],
+                                },
+                            )
+                        else:
+                            meta = event["result"]
                 else:
-                    raw3 = await svc3.generate_text(prompt3, **gen_kwargs)
-                    meta = await validate_and_fix_format(raw3, NovelMetaSchema, "novel_meta")
+                    meta = await generate_structured_result(
+                        svc3,
+                        prompt3,
+                        NovelMetaSchema,
+                        "novel_meta",
+                        gen_kwargs=gen_kwargs,
+                        use_json_schema=use_schema3,
+                    )
                 _log_workflow_event(
                     request_id,
                     "novel_meta",
@@ -912,8 +1444,4 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
             "result": final_result,
         })
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return _sse_response(event_stream())

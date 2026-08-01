@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Button, Chip } from "@heroui/react";
+import { Button } from "@heroui/react";
+import TagInput from "@/components/shared/TagInput";
 import AutoResizeTextarea from "./AutoResizeTextarea";
 import CollapsibleField from "./CollapsibleField";
 import { apiPut, apiPostForm, getImageUrl } from "@/lib/api";
@@ -17,8 +18,6 @@ import {
 
 export type { SectionKey } from "@/lib/novelFields";
 
-/* component props */
-
 interface NovelInfoSectionProps {
   sectionKey: SectionKey;
   data: Record<string, unknown>;
@@ -31,6 +30,99 @@ interface NovelInfoSectionProps {
   onChange?: (field: string, value: unknown) => void;
   hasChapters?: boolean;
   onDangerConfirm?: () => Promise<boolean>;
+  editLocked?: boolean;
+  onCoverUploadStateChange?: (uploading: boolean) => void;
+}
+
+const SECTION_NUMBER: Record<SectionKey, string> = {
+  basic: "01",
+  creative: "02",
+  content: "03",
+  style: "04",
+};
+
+const FIELD_LAYOUT_CLASSES: Record<SectionKey, Record<string, string>> = {
+  basic: {
+    title: "xl:col-start-4 xl:col-span-9 xl:row-start-1",
+    subtitle: "xl:col-start-4 xl:col-span-9 xl:row-start-2",
+    genre: "xl:col-start-4 xl:col-span-4 xl:row-start-3",
+    tags: "xl:col-start-8 xl:col-span-5 xl:row-start-3",
+    cover_image: "xl:col-start-1 xl:col-span-3 xl:row-start-1 xl:row-span-4",
+    number_of_chapters: "xl:col-start-4 xl:col-span-4 xl:row-start-4",
+    words_per_chapter: "xl:col-start-8 xl:col-span-5 xl:row-start-4",
+  },
+  creative: {},
+  content: {
+    introduction: "xl:col-span-5",
+    summary: "xl:col-span-7",
+    core_seed: "xl:col-span-4",
+    worldview: "xl:col-span-8",
+  },
+  style: {
+    writing_style: "xl:col-span-6",
+    era_background: "xl:col-span-6",
+    narrative_pov: "xl:col-span-12",
+  },
+};
+
+const FIELD_GRID_CLASS = "grid min-w-0 grid-cols-1 gap-x-6 gap-y-7 xl:grid-cols-12";
+const CONTROL_CLASS =
+  "w-full rounded-xl border border-border bg-background/80 px-3 py-2.5 text-sm text-foreground outline-none transition-[border-color,box-shadow] placeholder:text-muted/50 focus:border-accent focus:ring-2 focus:ring-accent/15";
+const READ_FIELD_CLASS = "grid min-w-0 content-start gap-2.5";
+const READ_LABEL_CLASS = "block text-[15px] font-semibold leading-5 tracking-wide text-muted";
+const READ_VALUE_CLASS = "block min-w-0 break-words leading-6 text-foreground";
+
+/**
+ * 返回字段在章节网格中的布局类。
+ *
+ * Args:
+ *   sectionKey: 字段所属的小说信息章节。
+ *   fieldKey: 字段键名。
+ *
+ * Returns:
+ *   对应的响应式网格类；未配置时占满当前行。
+ */
+function getFieldLayoutClass(sectionKey: SectionKey, fieldKey: string): string {
+  return FIELD_LAYOUT_CLASSES[sectionKey][fieldKey] || "md:col-span-12";
+}
+
+/**
+ * 把未知标签值收敛为字符串数组。
+ *
+ * Args:
+ *   value: 表单或接口返回的未知值。
+ *
+ * Returns:
+ *   可安全交给标签控件的字符串数组。
+ */
+function normalizeTagValues(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+/**
+ * 判断未知值是否为可保存的正整数。
+ *
+ * Args:
+ *   value: 需要校验的输入值。
+ *
+ * Returns:
+ *   值为大于 0 的整数时返回 true，否则返回 false。
+ */
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+/**
+ * 校验可选的正整数字段，空值保持为合法的“未设置”状态。
+ *
+ * Args:
+ *   value: 需要校验的输入值。
+ *
+ * Returns:
+ *   值为空或为正整数时返回 true，否则返回 false。
+ */
+function isValidOptionalPositiveInteger(value: unknown): boolean {
+  return value === undefined || value === null || value === "" || isPositiveInteger(value);
 }
 
 export default function NovelInfoSection({
@@ -45,64 +137,87 @@ export default function NovelInfoSection({
   onChange,
   hasChapters = false,
   onDangerConfirm,
+  editLocked = false,
+  onCoverUploadStateChange,
 }: NovelInfoSectionProps) {
   const t = useTranslations("novel");
   const tw = useTranslations("writing.novelInfo");
   const fields = SECTION_FIELDS[sectionKey];
+  const fieldIdPrefix = useId();
 
   const [editData, setEditData] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
-  const [tagInput, setTagInput] = useState("");
+  const [confirmingDanger, setConfirmingDanger] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [coverError, setCoverError] = useState("");
+  const [uploadingCover, setUploadingCover] = useState(false);
 
   const startEdit = () => {
     const snapshot: Record<string, unknown> = {};
-    for (const f of fields) {
-      snapshot[f.key] = data[f.key] ?? (f.type === "tags" ? [] : f.type === "number" ? 0 : "");
+    for (const field of fields) {
+      // 数字空值必须保留为 undefined，避免进入编辑态后被静默改写成 0。
+      snapshot[field.key] =
+        data[field.key] ??
+        (field.type === "tags" ? [] : field.type === "number" ? undefined : "");
     }
     setEditData(snapshot);
+    setSaveError("");
+    setCoverError("");
     onStartEdit();
   };
 
   const cancelEdit = () => {
     setEditData({});
-    setTagInput("");
+    setSaveError("");
+    setCoverError("");
     onCancelEdit();
   };
 
   const hasDangerousChanges = (): boolean => {
     if (!hasChapters) return false;
-    return fields.some((f) => {
-      if (!DANGEROUS_FIELDS.has(f.key)) return false;
-      const orig = String(data[f.key] ?? "");
-      const edit = String(editData[f.key] ?? "");
-      return orig !== edit;
+    return fields.some((field) => {
+      if (!DANGEROUS_FIELDS.has(field.key)) return false;
+      const originalValue = String(data[field.key] ?? "");
+      const editedValue = String(editData[field.key] ?? "");
+      return originalValue !== editedValue;
     });
   };
 
   const saveSection = async () => {
-    if (!isCreateMode && novelId) {
-      if (hasDangerousChanges() && onDangerConfirm) {
+    if (isCreateMode || !novelId) return;
+
+    if (hasDangerousChanges() && onDangerConfirm) {
+      setConfirmingDanger(true);
+      try {
         const confirmed = await onDangerConfirm();
         if (!confirmed) return;
-      }
-      try {
-        setSaving(true);
-        await apiPut(`/api/novels/${novelId}`, editData);
-        onSaved();
-      } catch {
-        // error handled upstream
       } finally {
-        setSaving(false);
+        setConfirmingDanger(false);
       }
     }
-    onCancelEdit();
+
+    try {
+      setSaving(true);
+      setSaveError("");
+      const result = await apiPut<{ success: boolean }>(`/api/novels/${novelId}`, editData);
+      if (!result.success) {
+        throw new Error(tw("saveNotApplied"));
+      }
+      setEditData({});
+      onSaved();
+    } catch (error) {
+      // 保存失败时保留当前编辑快照，让用户可以修正或直接重试。
+      setSaveError(error instanceof Error ? error.message : tw("saveFailed"));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const updateField = (key: string, value: unknown) => {
     if (isCreateMode && onChange) {
       onChange(key, value);
     } else {
-      setEditData((prev) => ({ ...prev, [key]: value }));
+      setEditData((previous) => ({ ...previous, [key]: value }));
     }
   };
 
@@ -112,273 +227,491 @@ export default function NovelInfoSection({
     return data[key];
   };
 
-  /* tag helpers */
-  const addTag = (tag: string) => {
-    const trimmed = tag.trim();
-    if (!trimmed) return;
-    const current = (getValue("tags") as string[]) || [];
-    if (!current.includes(trimmed)) {
-      updateField("tags", [...current, trimmed]);
-    }
-    setTagInput("");
-  };
-
-  const removeTag = (tag: string) => {
-    const current = (getValue("tags") as string[]) || [];
-    updateField("tags", current.filter((t) => t !== tag));
-  };
-
-  /* cover upload */
   const handleCoverUpload = async (file: File) => {
-    if (file.size > 2 * 1024 * 1024) return;
-    const fd = new FormData();
-    fd.append("file", file);
+    setCoverError("");
+    if (file.size > 2 * 1024 * 1024) {
+      setCoverError(tw("coverTooLarge"));
+      return;
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    setUploadingCover(true);
+    onCoverUploadStateChange?.(true);
     try {
-      const res = await apiPostForm<{ url: string }>("/api/upload/cover", fd);
-      updateField("cover_image", res.url);
-    } catch {
-      // silently handle
+      const result = await apiPostForm<{ url: string }>("/api/upload/cover", formData);
+      updateField("cover_image", result.url);
+    } catch (error) {
+      // 上传失败只影响封面字段，保留当前章节的其他编辑内容。
+      setCoverError(error instanceof Error ? error.message : tw("coverUploadFailed"));
+    } finally {
+      setUploadingCover(false);
+      onCoverUploadStateChange?.(false);
     }
   };
 
-  /* render helpers */
+  /**
+   * 渲染字段的语义提示与建议字数。
+   *
+   * Args:
+   *   field: 当前字段定义。
+   *   value: 当前字段值。
+   *   supportId: 提示文本对应的可访问性 ID。
+   *
+   * Returns:
+   *   字段提示节点；没有提示配置时返回 null。
+   */
+  const renderFieldSupport = (
+    field: NovelInfoFieldDef,
+    value: unknown,
+    supportId: string,
+  ) => {
+    const hint = field.hintKey ? tw(`fieldHints.${field.hintKey}`) : "";
+    const textValue = String(value ?? "");
+    const showCount = field.recommendedMaxLength !== undefined;
 
-  const renderReadField = (f: NovelInfoFieldDef) => {
-    const val = data[f.key];
-    const label = t(FIELD_LABEL_MAP[f.key] || f.key);
+    if (!hint && !showCount) return null;
 
-    if (f.type === "cover") {
-      const url = val as string | undefined;
+    return (
+      <div id={supportId} className="flex items-start justify-between gap-4 text-xs leading-5 text-muted">
+        <span>{hint}</span>
+        {showCount && (
+          <span
+            className={`shrink-0 tabular-nums ${
+              textValue.length > field.recommendedMaxLength! ? "text-red-600 dark:text-red-300" : ""
+            }`}
+          >
+            {tw("characterCount", {
+              count: textValue.length,
+              max: field.recommendedMaxLength!,
+            })}
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  const renderReadField = (
+    field: NovelInfoFieldDef,
+    layoutClassOverride?: string,
+  ) => {
+    const value = data[field.key];
+    const label = t(FIELD_LABEL_MAP[field.key] || field.key);
+    const layoutClass = layoutClassOverride ?? getFieldLayoutClass(sectionKey, field.key);
+
+    if (field.type === "cover") {
+      const url = value as string | undefined;
       return (
-        <div key={f.key} className="flex items-center gap-3">
-          <span className="text-sm text-muted w-20 shrink-0">{label}</span>
-          {url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={getImageUrl(url)} alt="cover" className="w-16 h-20 rounded object-cover" />
-          ) : (
-            <span className="text-sm text-muted/50">—</span>
-          )}
-        </div>
-      );
-    }
-
-    if (f.type === "tags") {
-      const tags = (val as string[]) || [];
-      return (
-        <div key={f.key} className="flex items-start gap-3">
-          <span className="text-sm text-muted w-20 shrink-0 pt-0.5">{label}</span>
-          <div className="flex flex-wrap gap-1.5">
-            {tags.length > 0
-              ? tags.map((tag) => (
-                  <Chip key={tag} variant="soft" size="sm">{tag}</Chip>
-                ))
-              : <span className="text-sm text-muted/50">—</span>}
+        <div key={field.key} className={`${layoutClass} ${READ_FIELD_CLASS}`}>
+          <span className={READ_LABEL_CLASS}>{label}</span>
+          <div className="aspect-[3/4] max-w-44 overflow-hidden rounded-2xl border border-border bg-surface-secondary">
+            {url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={getImageUrl(url)} alt={label} className="h-full w-full object-cover" />
+            ) : (
+              <div className="grid h-full place-items-center text-xs text-muted/60">{tw("noCover")}</div>
+            )}
           </div>
         </div>
       );
     }
 
-    if (LONG_TEXT_FIELDS.has(f.key)) {
+    if (field.type === "tags") {
+      const tags = normalizeTagValues(value);
       return (
-        <CollapsibleField
-          key={f.key}
-          label={label}
-          value={String(val ?? "")}
-          noContentText={tw("noContent")}
-        />
+        <div key={field.key} className={`${layoutClass} ${READ_FIELD_CLASS}`}>
+          <span className={READ_LABEL_CLASS}>{label}</span>
+          <div className="flex flex-wrap gap-2">
+            {tags.length > 0 ? (
+              tags.map((tag) => (
+                <span key={tag} className="rounded-full bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent">
+                  {tag}
+                </span>
+              ))
+            ) : (
+              <span className="text-sm text-muted/50">—</span>
+            )}
+          </div>
+        </div>
       );
     }
 
-    if (f.type === "select" && f.options) {
-      const display = f.options.find((o) => o.value === val);
+    if (LONG_TEXT_FIELDS.has(field.key)) {
       return (
-        <div key={f.key} className="flex items-center gap-3">
-          <span className="text-sm text-muted w-20 shrink-0">{label}</span>
-          <span className="text-sm text-foreground">
-            {display ? t(display.labelKey) : String(val ?? "—")}
+        <div key={field.key} className={`${layoutClass} min-w-0 self-start`}>
+          <CollapsibleField
+            label={label}
+            value={String(value ?? "")}
+            noContentText={tw("noContent")}
+          />
+        </div>
+      );
+    }
+
+    if (field.type === "select" && field.options) {
+      const display = field.options.find((option) => option.value === value);
+      return (
+        <div key={field.key} className={`${layoutClass} ${READ_FIELD_CLASS}`}>
+          <span className={READ_LABEL_CLASS}>{label}</span>
+          <span className={`${READ_VALUE_CLASS} text-[15px]`}>
+            {display ? t(display.labelKey) : String(value ?? "—")}
           </span>
         </div>
       );
     }
 
+    const unit = field.unitKey ? tw(`units.${field.unitKey}`) : "";
+    const valueClass = field.key === "title"
+      ? "text-lg font-semibold tracking-tight"
+      : field.type === "number"
+        ? "text-base font-semibold tabular-nums"
+        : "text-[15px]";
     return (
-      <div key={f.key} className="flex items-center gap-3">
-        <span className="text-sm text-muted w-20 shrink-0">{label}</span>
-        <span className="text-sm text-foreground">{val != null && val !== "" ? String(val) : "—"}</span>
+      <div key={field.key} className={`${layoutClass} ${READ_FIELD_CLASS}`}>
+        <span className={READ_LABEL_CLASS}>{label}</span>
+        <span className={`${READ_VALUE_CLASS} ${valueClass}`}>
+          {value != null && value !== "" ? `${String(value)}${unit ? ` ${unit}` : ""}` : "—"}
+        </span>
       </div>
     );
   };
 
-  const renderEditField = (f: NovelInfoFieldDef) => {
-    const val = getValue(f.key);
-    const label = t(FIELD_LABEL_MAP[f.key] || f.key);
+  const renderEditField = (
+    field: NovelInfoFieldDef,
+    layoutClassOverride?: string,
+  ) => {
+    const value = getValue(field.key);
+    const label = t(FIELD_LABEL_MAP[field.key] || field.key);
+    const inputId = `${fieldIdPrefix}-${field.key}`;
+    const supportId = `${inputId}-support`;
+    const layoutClass = layoutClassOverride ?? getFieldLayoutClass(sectionKey, field.key);
 
-    if (f.type === "cover") {
-      const url = val as string | undefined;
+    if (field.type === "cover") {
+      const url = value as string | undefined;
       return (
-        <div key={f.key} className="space-y-2">
-          <label className="text-sm font-medium text-foreground">{label}</label>
-          <div className="flex items-center gap-3">
+        <div key={field.key} className={`${layoutClass} space-y-2`}>
+          <span className="text-sm font-semibold leading-5 tracking-wide text-muted">{label}</span>
+          <div className="aspect-[3/4] max-w-44 overflow-hidden rounded-2xl border border-dashed border-border bg-surface-secondary">
             {url ? (
-              <>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={getImageUrl(url)} alt="cover" className="w-16 h-20 rounded object-cover" />
-                <Button variant="ghost" size="sm" onPress={() => updateField("cover_image", "")}>
-                  {t("removeCover")}
-                </Button>
-              </>
-            ) : null}
-            <label className="cursor-pointer text-sm text-accent hover:underline">
-              {t("uploadCover")}
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) handleCoverUpload(file);
-                }}
-              />
-            </label>
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={getImageUrl(url)} alt={label} className="h-full w-full object-cover" />
+            ) : (
+              <label className="relative grid h-full cursor-pointer place-items-center px-4 text-center text-xs leading-5 text-muted transition-colors hover:text-accent focus-within:ring-2 focus-within:ring-inset focus-within:ring-accent">
+                <span>{t("uploadCover")}</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                  aria-label={t("uploadCover")}
+                  disabled={uploadingCover}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) handleCoverUpload(file);
+                  }}
+                />
+              </label>
+            )}
           </div>
-        </div>
-      );
-    }
-
-    if (f.type === "tags") {
-      const tags = (val as string[]) || [];
-      return (
-        <div key={f.key} className="space-y-2">
-          <label className="text-sm font-medium text-foreground">{label}</label>
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {tags.map((tag) => (
-              <Chip key={tag} variant="soft" size="sm">
-                {tag}
+          <div className="flex max-w-44 items-center gap-2">
+            {url && (
+              <>
+                <label className="relative cursor-pointer rounded text-xs font-medium text-accent hover:underline focus-within:ring-2 focus-within:ring-accent/30">
+                  <span>{t("uploadCover")}</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                    aria-label={t("uploadCover")}
+                    disabled={uploadingCover}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) handleCoverUpload(file);
+                    }}
+                  />
+                </label>
                 <button
                   type="button"
-                  className="ml-1 text-muted hover:text-foreground"
-                  onClick={() => removeTag(tag)}
+                  className="ml-auto text-xs text-muted hover:text-foreground"
+                  onClick={() => updateField("cover_image", "")}
                 >
-                  ×
+                  {t("removeCover")}
                 </button>
-              </Chip>
-            ))}
+              </>
+            )}
           </div>
-          <input
-            className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-            value={tagInput}
-            onChange={(e) => setTagInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                addTag(tagInput);
-              }
-            }}
-            placeholder={t("tags")}
-          />
+          {coverError && (
+            <p role="alert" className="max-w-44 text-xs leading-5 text-red-700 dark:text-red-300">
+              {coverError}
+            </p>
+          )}
+          {uploadingCover && (
+            <p role="status" className="max-w-44 text-xs leading-5 text-muted">
+              {tw("coverUploading")}
+            </p>
+          )}
         </div>
       );
     }
 
-    if (f.type === "textarea") {
+    if (field.type === "tags") {
       return (
-        <div key={f.key} className="space-y-2">
-          <label className="text-sm font-medium text-foreground">{label}</label>
+        <TagInput
+          key={field.key}
+          className={layoutClass}
+          label={label}
+          values={normalizeTagValues(value)}
+          onChange={(tags) => updateField(field.key, tags)}
+          getRemoveAriaLabel={(tag) => tw("removeTag", { tag })}
+          placeholder={tw("tagPlaceholder")}
+          description={tw("fieldHints.tags")}
+          limitReachedText={tw("tagLimitReached")}
+          maxItems={5}
+        />
+      );
+    }
+
+    if (field.type === "textarea") {
+      return (
+        <div key={field.key} className={`${layoutClass} grid content-start gap-2`}>
+          <label htmlFor={inputId} className="text-sm font-semibold leading-5 tracking-wide text-muted">
+            {label}
+          </label>
           <AutoResizeTextarea
-            value={String(val ?? "")}
-            onChange={(v) => updateField(f.key, v)}
-            placeholder={label}
+            id={inputId}
+            value={String(value ?? "")}
+            onChange={(nextValue) => updateField(field.key, nextValue)}
+            placeholder={tw("fieldPlaceholder", { field: label })}
+            minHeight={field.minHeight}
+            maxHeight={field.maxHeight}
+            ariaDescribedBy={supportId}
+            className={field.key === "plot" ? "text-[15px] leading-7" : "leading-6"}
           />
+          {renderFieldSupport(field, value, supportId)}
         </div>
       );
     }
 
-    if (f.type === "number") {
+    if (field.type === "number") {
+      const numberValue =
+        typeof value === "number" && Number.isFinite(value) ? value : undefined;
+      const invalidNumber = !isValidOptionalPositiveInteger(value);
+      const step = field.key === "words_per_chapter" ? 100 : 1;
+      const unit = field.unitKey ? tw(`units.${field.unitKey}`) : "";
+
+      const changeNumberBy = (direction: -1 | 1) => {
+        // 空值首次递增时从合理的最小步长开始，递减始终不低于 1。
+        const currentValue = isPositiveInteger(numberValue) ? numberValue : 0;
+        const nextValue = Math.max(1, currentValue + direction * step);
+        updateField(field.key, nextValue);
+      };
+
       return (
-        <div key={f.key} className="space-y-2">
-          <label className="text-sm font-medium text-foreground">{label}</label>
-          <input
-            type="number"
-            className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-            value={val != null ? Number(val) : ""}
-            onChange={(e) => updateField(f.key, e.target.value ? Number(e.target.value) : undefined)}
-            min={0}
-          />
+        <div key={field.key} className={`${layoutClass} grid content-start gap-2`}>
+          <label htmlFor={inputId} className="text-sm font-semibold leading-5 tracking-wide text-muted">
+            {label}
+          </label>
+          <div className="flex min-h-12 items-stretch overflow-hidden rounded-xl border border-border bg-background/80 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15">
+            <button
+              type="button"
+              className="w-11 shrink-0 border-r border-border text-lg text-muted transition-colors hover:bg-surface-secondary hover:text-foreground disabled:opacity-35"
+              onClick={() => changeNumberBy(-1)}
+              disabled={numberValue === undefined || numberValue <= 1}
+              aria-label={tw("decreaseField", { field: label })}
+            >
+              −
+            </button>
+            <input
+              id={inputId}
+              type="number"
+              className="min-w-0 flex-1 bg-transparent px-3 text-center text-base font-semibold tabular-nums text-foreground outline-none"
+              value={numberValue ?? ""}
+              onChange={(event) => {
+                const rawValue = event.target.value;
+                // 创建草稿用 undefined 表示未填写；编辑已有小说时用 null 显式清空数据库字段。
+                updateField(
+                  field.key,
+                  rawValue === "" ? (isCreateMode ? undefined : null) : Number(rawValue),
+                );
+              }}
+              min={1}
+              step={step}
+              aria-invalid={invalidNumber}
+              aria-describedby={`${supportId}${invalidNumber ? ` ${inputId}-error` : ""}`}
+            />
+            <span className="grid min-w-16 place-items-center border-l border-border px-3 text-xs text-muted">
+              {unit}
+            </span>
+            <button
+              type="button"
+              className="w-11 shrink-0 border-l border-border text-lg text-muted transition-colors hover:bg-surface-secondary hover:text-foreground"
+              onClick={() => changeNumberBy(1)}
+              aria-label={tw("increaseField", { field: label })}
+            >
+              +
+            </button>
+          </div>
+          {renderFieldSupport(field, value, supportId)}
+          {invalidNumber && (
+            <p id={`${inputId}-error`} role="alert" className="text-xs leading-5 text-red-700 dark:text-red-300">
+              {tw("positiveIntegerRequired")}
+            </p>
+          )}
         </div>
       );
     }
 
-    if (f.type === "select" && f.options) {
+    if (field.type === "select" && field.options) {
+      const stringValue = String(value ?? "");
+      const knownValue = field.options.some((option) => option.value === stringValue);
+      const options = [
+        { value: "", labelKey: "" },
+        ...(!knownValue && stringValue ? [{ value: stringValue, labelKey: "" }] : []),
+        ...field.options,
+      ];
+
       return (
-        <div key={f.key} className="space-y-2">
-          <label className="text-sm font-medium text-foreground">{label}</label>
-          <select
-            className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-            value={String(val ?? "")}
-            onChange={(e) => updateField(f.key, e.target.value)}
-          >
-            <option value="">—</option>
-            {f.options.map((o) => (
-              <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
-            ))}
-          </select>
-        </div>
+        <fieldset key={field.key} className={`${layoutClass} grid content-start gap-2`} aria-describedby={supportId}>
+          <legend className="text-sm font-semibold leading-5 tracking-wide text-muted">{label}</legend>
+          <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={label}>
+            {options.map((option) => {
+              const selected = option.value === stringValue;
+              const optionLabel = !option.value
+                ? tw("notSet")
+                : option.labelKey
+                ? t(option.labelKey)
+                : tw("legacyPov", { value: option.value });
+              return (
+                <label
+                  key={option.value}
+                  className={`cursor-pointer rounded-full border px-4 py-2 text-sm font-medium transition-[border-color,background-color,color,box-shadow] focus-within:ring-2 focus-within:ring-accent/20 ${
+                    selected
+                      ? "border-accent bg-accent text-white shadow-sm"
+                      : "border-border bg-background/70 text-muted hover:border-accent/50 hover:text-foreground"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name={`${fieldIdPrefix}-${field.key}`}
+                    value={option.value}
+                    checked={selected}
+                    onChange={() => updateField(field.key, option.value)}
+                    className="sr-only"
+                  />
+                  {optionLabel}
+                </label>
+              );
+            })}
+          </div>
+          {renderFieldSupport(field, value, supportId)}
+        </fieldset>
       );
     }
 
     return (
-      <div key={f.key} className="space-y-2">
-        <label className="text-sm font-medium text-foreground">{label}</label>
+      <div key={field.key} className={`${layoutClass} grid content-start gap-2`}>
+        <label htmlFor={inputId} className="text-sm font-semibold leading-5 tracking-wide text-muted">
+          {label}
+        </label>
         <input
-          className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-          value={String(val ?? "")}
-          onChange={(e) => updateField(f.key, e.target.value)}
-          placeholder={label}
+          id={inputId}
+          className={`${CONTROL_CLASS} ${
+            field.key === "title" ? "py-3 text-lg font-semibold tracking-tight" : ""
+          }`}
+          value={String(value ?? "")}
+          onChange={(event) => updateField(field.key, event.target.value)}
+          placeholder={tw("fieldPlaceholder", { field: label })}
+          aria-describedby={supportId}
         />
+        {renderFieldSupport(field, value, supportId)}
       </div>
     );
   };
-
-  /* main render */
 
   const sectionTitle = tw(`sections.${sectionKey}`);
   const showEditButton = !isCreateMode && !isEditing;
   const showSaveCancel = !isCreateMode && isEditing;
+  const hasInvalidNumberFields = fields.some(
+    (field) => field.type === "number" && !isValidOptionalPositiveInteger(getValue(field.key)),
+  );
+  const renderField = (isEditing || isCreateMode) ? renderEditField : renderReadField;
+  const plotField = fields.find((field) => field.key === "plot");
+  const coreIdeaField = fields.find((field) => field.key === "core_idea");
+  const toneField = fields.find((field) => field.key === "tone");
+  const targetAudienceField = fields.find((field) => field.key === "target_audience");
+
+  // 创意设定采用独立左右列，避免主线展开后的高度参与右侧字段的网格行计算。
+  const useCreativeColumns =
+    sectionKey === "creative" &&
+    plotField !== undefined &&
+    coreIdeaField !== undefined &&
+    toneField !== undefined &&
+    targetAudienceField !== undefined;
 
   return (
-    <div className="border border-border rounded-xl bg-surface">
-      {/* section header */}
-      <div className="flex items-center justify-between px-5 py-3 border-b border-border/50">
-        <h3 className="text-sm font-semibold text-foreground">{sectionTitle}</h3>
-        {showEditButton && (
-          <Button variant="ghost" size="sm" onPress={startEdit}>
-            {tw("editSection")}
-          </Button>
-        )}
-        {showSaveCancel && (
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onPress={cancelEdit} isDisabled={saving}>
-              {tw("cancelEdit")}
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onPress={saveSection}
-              isDisabled={saving}
-              className="bg-accent text-white hover:bg-accent-hover"
-            >
-              {saving ? tw("saving") : tw("saveSection")}
-            </Button>
-          </div>
-        )}
-      </div>
+    <section className="grid gap-6 border-t border-border/70 py-8 first:border-t-0 lg:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)] lg:gap-10 lg:py-10">
+      <header className="self-start lg:sticky lg:top-0">
+        <div className="mb-3 flex items-center gap-3">
+          <span className="font-mono text-[15px] font-bold leading-none tracking-[0.16em] text-accent">
+            {SECTION_NUMBER[sectionKey]}
+          </span>
+          <span className="h-px flex-1 bg-border/70" />
+        </div>
+        <h3 className="text-lg font-semibold tracking-tight text-foreground">{sectionTitle}</h3>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          {tw(`sectionDescriptions.${sectionKey}`)}
+        </p>
 
-      {/* section body */}
-      <div className="px-5 py-4 space-y-3">
-        {(isEditing || isCreateMode)
-          ? fields.map(renderEditField)
-          : fields.map(renderReadField)}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {showEditButton && (
+            <Button variant="outline" size="sm" onPress={startEdit} isDisabled={editLocked}>
+              {tw("editSection")}
+            </Button>
+          )}
+          {showSaveCancel && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                onPress={cancelEdit}
+                isDisabled={saving || confirmingDanger || uploadingCover}
+              >
+                {tw("cancelEdit")}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onPress={saveSection}
+                isDisabled={saving || confirmingDanger || uploadingCover || hasInvalidNumberFields}
+                className="bg-accent text-white hover:bg-accent-hover"
+              >
+                {saving ? tw("saving") : tw("saveSection")}
+              </Button>
+            </>
+          )}
+        </div>
+
+        {saveError && (
+          <p role="alert" className="mt-4 border-l-2 border-red-500 pl-3 text-xs leading-5 text-red-700 dark:text-red-300">
+            {tw("saveErrorMessage", { error: saveError })}
+          </p>
+        )}
+      </header>
+
+      <div className={FIELD_GRID_CLASS}>
+        {useCreativeColumns ? (
+          <>
+            {renderField(plotField, "min-w-0 xl:col-span-8")}
+            <div className="grid min-w-0 content-start gap-7 xl:col-span-4">
+              {renderField(coreIdeaField, "min-w-0")}
+              <div className="grid min-w-0 content-start gap-6 sm:grid-cols-2">
+                {renderField(toneField, "min-w-0")}
+                {renderField(targetAudienceField, "min-w-0")}
+              </div>
+            </div>
+          </>
+        ) : (
+          fields.map((field) => renderField(field))
+        )}
       </div>
-    </div>
+    </section>
   );
 }

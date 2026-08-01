@@ -14,11 +14,42 @@ import type {
 } from "@/types/novel";
 import { clearWritingDraft, loadWritingDraft, updateWritingDraft } from "@/lib/writingDraft";
 import { normalizeRewriteState } from "@/lib/rewriteDraftState";
+import { CREATE_NOVEL_CONTEXT_FIELDS } from "@/lib/novelFields";
 import NovelInfoSection, { type SectionKey } from "./NovelInfoSection";
 import NovelRewriteAssistant from "./NovelRewriteAssistant";
 import StickyActionBar from "./StickyActionBar";
 
-const SECTIONS: SectionKey[] = ["basic", "creative", "scale", "content", "style"];
+const SECTIONS: SectionKey[] = ["basic", "creative", "content", "style"];
+
+/**
+ * 判断创建态复核字段是否已经有可用内容。
+ *
+ * Args:
+ *   value: 草稿中的字段值。
+ *
+ * Returns:
+ *   字符串、数组或数字已填写时返回 true，否则返回 false。
+ */
+function hasReviewValue(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "number") return Number.isFinite(value) && value > 0;
+  if (typeof value === "string") return value.trim().length > 0;
+  return value !== null && value !== undefined;
+}
+
+/**
+ * 校验可选规模字段；空值允许保存，填写后必须为正整数。
+ *
+ * Args:
+ *   value: 章节数或单章字数。
+ *
+ * Returns:
+ *   空值或正整数返回 true，其他值返回 false。
+ */
+function isValidOptionalPositiveInteger(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return true;
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
 
 interface NovelInfoWorkspaceProps {
   mode: "create" | "edit";
@@ -43,10 +74,13 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
   const [editingSection, setEditingSection] = useState<SectionKey | null>(null);
   const [creating, setCreating] = useState(false);
   const [hasChapters, setHasChapters] = useState(false);
+  const [coverUploading, setCoverUploading] = useState(false);
 
   /* danger confirm */
   const [showDangerModal, setShowDangerModal] = useState(false);
   const [dangerResolve, setDangerResolve] = useState<((v: boolean) => void) | null>(null);
+  const dangerCancelButtonRef = useRef<HTMLButtonElement>(null);
+  const dangerPreviousFocusRef = useRef<HTMLElement | null>(null);
 
   const persistCreateDraft = useCallback(
     (nextData: Record<string, unknown>) => {
@@ -112,10 +146,11 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
 
   /* create novel */
   const handleCreate = async () => {
+    if (!canCreate || coverUploading) return;
     try {
       setCreating(true);
       const payload: CreateNovelRequest = {
-        title: String(data.title || ""),
+        title: String(data.title || "").trim(),
         subtitle: data.subtitle ? String(data.subtitle) : undefined,
         genre: data.genre ? String(data.genre) : undefined,
         tags: Array.isArray(data.tags) ? data.tags : undefined,
@@ -171,16 +206,49 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
   /* danger confirm promise */
   const requestDangerConfirm = (): Promise<boolean> => {
     return new Promise((resolve) => {
+      dangerPreviousFocusRef.current = document.activeElement as HTMLElement | null;
       setDangerResolve(() => resolve);
       setShowDangerModal(true);
     });
   };
 
-  const handleDangerResponse = (confirmed: boolean) => {
+  const handleDangerResponse = useCallback((confirmed: boolean) => {
     setShowDangerModal(false);
     dangerResolve?.(confirmed);
     setDangerResolve(null);
-  };
+  }, [dangerResolve]);
+
+  useEffect(() => {
+    if (!showDangerModal) return;
+
+    const animationFrame = requestAnimationFrame(() => dangerCancelButtonRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        handleDangerResponse(false);
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      document.removeEventListener("keydown", handleKeyDown);
+      dangerPreviousFocusRef.current?.focus();
+      dangerPreviousFocusRef.current = null;
+    };
+  }, [showDangerModal, handleDangerResponse]);
+
+  const reviewTotal = CREATE_NOVEL_CONTEXT_FIELDS.length;
+  const reviewCompleted = CREATE_NOVEL_CONTEXT_FIELDS.reduce(
+    (count, field) => count + (hasReviewValue(data[field]) ? 1 : 0),
+    0,
+  );
+  const reviewPercent = Math.round((reviewCompleted / reviewTotal) * 100);
+  const remainingReviewFields = reviewTotal - reviewCompleted;
+  const canCreate =
+    String(data.title ?? "").trim().length > 0 &&
+    isValidOptionalPositiveInteger(data.number_of_chapters) &&
+    isValidOptionalPositiveInteger(data.words_per_chapter);
 
   /* render */
 
@@ -196,7 +264,7 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-3">
         <p className="text-muted">{twd("loadFailed")}</p>
-        <Button variant="outline" onPress={loadNovel}>{tw("saveSection")}</Button>
+        <Button variant="outline" onPress={loadNovel}>{tw("retryLoad")}</Button>
       </div>
     );
   }
@@ -223,7 +291,12 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
       {/* Danger Confirm Modal */}
       {showDangerModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-background rounded-xl shadow-xl p-6 max-w-md mx-4 border border-border">
+          <div
+            className="bg-background rounded-xl shadow-xl p-6 max-w-md mx-4 border border-border"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="novel-danger-title"
+          >
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-full bg-warning/10 flex items-center justify-center shrink-0">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-warning">
@@ -231,11 +304,16 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
                   <path d="M12 9v4" /><path d="M12 17h.01" />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold text-foreground">{twd("dangerEditTitle")}</h3>
+              <h3 id="novel-danger-title" className="text-lg font-semibold text-foreground">{twd("dangerEditTitle")}</h3>
             </div>
             <p className="text-sm text-muted mb-5">{twd("dangerEditMessage")}</p>
             <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onPress={() => handleDangerResponse(false)}>
+              <Button
+                ref={dangerCancelButtonRef}
+                variant="ghost"
+                size="sm"
+                onPress={() => handleDangerResponse(false)}
+              >
                 {twd("cancel")}
               </Button>
               <Button variant="primary" size="sm" className="bg-accent text-white hover:bg-accent-hover" onPress={() => handleDangerResponse(true)}>
@@ -246,37 +324,89 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
         </div>
       )}
 
-      {/* Header */}
-      <div className="px-6 py-4 border-b border-border">
-        <h2 className="text-lg font-bold text-foreground">
-          {mode === "create" ? tw("createTitle") : tw("editTitle")}
-        </h2>
-        {mode === "create" && (
-          <p className="text-sm text-muted mt-1">{tw("createDescription")}</p>
-        )}
+      {/* 页面标题与创建态复核进度共用一条编辑工作台头部。 */}
+      <div className="shrink-0 border-b border-border bg-surface/45 px-4 py-5 sm:px-6">
+        <div className="mx-auto max-w-7xl">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-accent">
+                {mode === "create" ? tw("reviewEyebrow") : tw("workspaceEyebrow")}
+              </p>
+              <h2 className="text-xl font-bold tracking-tight text-foreground sm:text-2xl">
+                {mode === "create" ? tw("createTitle") : tw("editTitle")}
+              </h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">
+                {mode === "create" ? tw("createDescription") : tw("editDescription")}
+              </p>
+            </div>
+
+            {mode === "create" && (
+              <div className="w-full max-w-sm sm:w-72">
+                <div className="mb-2 flex items-center justify-between gap-4 text-xs">
+                  <span className="font-medium text-foreground">
+                    {remainingReviewFields === 0
+                      ? tw("reviewReady")
+                      : tw("reviewPending", { count: remainingReviewFields })}
+                  </span>
+                  <span className="shrink-0 tabular-nums text-muted">
+                    {tw("reviewProgress", { completed: reviewCompleted, total: reviewTotal })}
+                  </span>
+                </div>
+                <div
+                  className="h-1.5 overflow-hidden rounded-full bg-border/60"
+                  role="progressbar"
+                  aria-label={tw("reviewProgressLabel")}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={reviewPercent}
+                >
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width] duration-300"
+                    style={{ width: `${reviewPercent}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Sections */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-        {SECTIONS.map((sk) => (
-          <NovelInfoSection
-            key={sk}
-            sectionKey={sk}
+      {/* 桌面端让 AI 助手成为独立右栏；窄屏仍由助手组件切换为悬浮面板。 */}
+      <div className="flex min-h-0 flex-1">
+        <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 sm:px-6">
+          <div className="mx-auto max-w-7xl">
+            {SECTIONS.map((sectionKey) => (
+              <NovelInfoSection
+                key={sectionKey}
+                sectionKey={sectionKey}
+                data={data}
+                novelId={novelId}
+                isCreateMode={mode === "create"}
+                isEditing={mode === "create" || editingSection === sectionKey}
+                onStartEdit={() => setEditingSection(sectionKey)}
+                onCancelEdit={() => setEditingSection(null)}
+                onSaved={() => {
+                  setEditingSection(null);
+                  loadNovel();
+                }}
+                onChange={mode === "create" ? handleFieldChange : undefined}
+                hasChapters={hasChapters}
+                onDangerConfirm={requestDangerConfirm}
+                editLocked={editingSection !== null && editingSection !== sectionKey}
+                onCoverUploadStateChange={setCoverUploading}
+              />
+            ))}
+          </div>
+        </div>
+
+        {mode === "create" && (
+          <NovelRewriteAssistant
             data={data}
-            novelId={novelId}
-            isCreateMode={mode === "create"}
-            isEditing={mode === "create" || editingSection === sk}
-            onStartEdit={() => setEditingSection(sk)}
-            onCancelEdit={() => setEditingSection(null)}
-            onSaved={() => {
-              setEditingSection(null);
-              loadNovel();
-            }}
-            onChange={mode === "create" ? handleFieldChange : undefined}
-            hasChapters={hasChapters}
-            onDangerConfirm={requestDangerConfirm}
+            rewriteState={normalizeRewriteState(data._rewriteState as WritingDraftRewriteState | undefined)}
+            onApplyRewrite={handleApplyRewrite}
+            onRewriteStateChange={handleRewriteStateChange}
           />
-        ))}
+        )}
       </div>
 
       {/* Sticky action bar - create mode */}
@@ -284,6 +414,7 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
         <StickyActionBar>
           <Button
             variant="ghost"
+            isDisabled={coverUploading || creating}
             onPress={() => {
               clearWritingDraft(draftId);
               router.push(`/${locale}`);
@@ -294,7 +425,7 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
           <Button
             variant="primary"
             onPress={handleCreate}
-            isDisabled={creating || !data.title}
+            isDisabled={creating || coverUploading || !canCreate}
             className="bg-accent text-white hover:bg-accent-hover"
           >
             {creating ? tw("creating") : tw("saveCreate")}
@@ -302,14 +433,6 @@ export default function NovelInfoWorkspace({ mode, novelId }: NovelInfoWorkspace
         </StickyActionBar>
       )}
 
-      {mode === "create" && (
-        <NovelRewriteAssistant
-          data={data}
-          rewriteState={normalizeRewriteState(data._rewriteState as WritingDraftRewriteState | undefined)}
-          onApplyRewrite={handleApplyRewrite}
-          onRewriteStateChange={handleRewriteStateChange}
-        />
-      )}
     </div>
   );
 }

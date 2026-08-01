@@ -1,4 +1,6 @@
 import logging
+import os
+
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.errors import ConnectionFailure
@@ -9,6 +11,41 @@ logger = logging.getLogger(__name__)
 
 client: AsyncMongoClient | None = None
 _active_connection_settings: tuple[str, str, int] | None = None
+MONGODB_URL_ENV_VAR = "NOVEL_GENERATOR_MONGODB_URL"
+MONGO_DATABASE_NAME_ENV_VAR = "NOVEL_GENERATOR_MONGO_DATABASE_NAME"
+
+
+def _get_runtime_setting(env_name: str, config_key: str, default: str) -> str:
+    """优先读取进程级覆盖值，未设置时回退到托管配置。
+
+    Args:
+        env_name: 仅作用于当前进程的环境变量名。
+        config_key: YAML 托管配置中的字段名。
+        default: 两处均未提供有效值时使用的默认值。
+
+    Returns:
+        去除首尾空白后的运行时配置值。
+    """
+    override = os.getenv(env_name)
+    if override is not None and override.strip():
+        return override.strip()
+    return str(get_config_value(config_key, default)).strip() or default
+
+
+def _get_database_name() -> str:
+    """读取当前进程实际使用的 MongoDB 数据库名。
+
+    Args:
+        无。
+
+    Returns:
+        测试进程覆盖值或托管配置中的数据库名。
+    """
+    return _get_runtime_setting(
+        MONGO_DATABASE_NAME_ENV_VAR,
+        "mongo_database_name",
+        "novel_generator",
+    )
 
 
 def _get_connection_settings() -> tuple[str, str, int]:
@@ -20,8 +57,13 @@ def _get_connection_settings() -> tuple[str, str, int]:
     Returns:
         包含连接串、数据库名和服务选择超时时间的元组。
     """
-    mongo_uri = str(get_config_value("mongodb_url", "mongodb://localhost:27017"))
-    db_name = str(get_config_value("mongo_database_name", "novel_generator"))
+    # 进程级覆盖只用于隔离测试/临时运行，不会回写用户的 config.yaml。
+    mongo_uri = _get_runtime_setting(
+        MONGODB_URL_ENV_VAR,
+        "mongodb_url",
+        "mongodb://localhost:27017",
+    )
+    db_name = _get_database_name()
     timeout_ms = int(get_config_value("mongo_timeout_ms", 5000))
     return mongo_uri, db_name, timeout_ms
 
@@ -85,8 +127,7 @@ def get_database() -> AsyncDatabase:
     Returns:
         PyMongo Async 数据库对象。
     """
-    db_name = str(get_config_value("mongo_database_name", "novel_generator"))
-    return get_client()[db_name]
+    return get_client()[_get_database_name()]
 
 async def close_mongo_connection():
     """关闭 MongoDB 异步客户端连接。

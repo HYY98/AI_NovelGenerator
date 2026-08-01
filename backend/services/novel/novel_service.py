@@ -8,9 +8,13 @@ from backend.db.utils import to_object_id
 class NovelService:
     @staticmethod
     async def check_novel_before_delete(novel_id: str) -> Tuple[bool, str]:
-        """
-        检查小说是否可以安全进行物理删除。
-        返回：(是否安全, 提示信息)
+        """检查小说是否已进入回收站并允许物理删除。
+
+        Args:
+            novel_id: 小说 MongoDB ObjectId 字符串。
+
+        Returns:
+            包含是否可删除及原因说明的二元组。
         """
         try:
             # 首先检查小说是否存在（包括已软删除的）
@@ -26,9 +30,16 @@ class NovelService:
 
     @staticmethod
     async def hard_delete_novel(novel_id: str) -> Dict[str, Any]:
-        """
-        物理删除小说及其所有关联记录。
-        **仅允许用于整本小说永久删除**
+        """物理删除回收站小说及其全部已知关联记录。
+
+        Args:
+            novel_id: 小说 MongoDB ObjectId 字符串。
+
+        Returns:
+            按集合统计的永久删除数量。
+
+        Raises:
+            ValueError: 小说不存在或尚未软删除。
         """
         async def _delete(session):
             """在同一个写入单元内删除小说及所有已知子集合。"""
@@ -50,6 +61,9 @@ class NovelService:
             memories_repo = BaseRepository("memory_fragments")
             factions_repo = BaseRepository("factions")
             faction_relations_repo = BaseRepository("faction_relations")
+            characters_repo = BaseRepository("characters")
+            character_relations_repo = BaseRepository("character_relations")
+            character_bindings_repo = BaseRepository("character_faction_bindings")
 
             stats = {}
 
@@ -59,8 +73,12 @@ class NovelService:
             stats["outlines_deleted"] = await outlines_repo.hard_delete_many(query, session=session)
             stats["tasks_deleted"] = await tasks_repo.hard_delete_many(query, session=session)
             stats["memories_deleted"] = await memories_repo.hard_delete_many(query, session=session)
+            # 先删除所有端点引用，再删除势力与角色主档，避免顺序写期间形成悬空端点。
+            stats["character_relations_deleted"] = await character_relations_repo.hard_delete_many(query, session=session)
+            stats["character_faction_bindings_deleted"] = await character_bindings_repo.hard_delete_many(query, session=session)
             stats["faction_relations_deleted"] = await faction_relations_repo.hard_delete_many(query, session=session)
             stats["factions_deleted"] = await factions_repo.hard_delete_many(query, session=session)
+            stats["characters_deleted"] = await characters_repo.hard_delete_many(query, session=session)
 
             novel_deleted = await novel_repo.hard_delete_one({"_id": obj_id}, session=session)
             stats["novel_deleted"] = 1 if novel_deleted else 0

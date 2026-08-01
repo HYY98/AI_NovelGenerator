@@ -195,6 +195,8 @@ export function removeProviderAlias(config: AppConfig, aliasToRemove: string): A
 
 export const CREATE_NOVEL_WORKFLOW_NAME = "create_novel_by_ai";
 export const CREATE_FACTIONS_WORKFLOW_NAME = "create_factions_by_ai";
+export const CREATE_CORE_CHARACTERS_WORKFLOW_NAME = "create_characters_by_ai";
+export const CREATE_CHARACTER_RELATIONS_WORKFLOW_NAME = "create_character_relations_by_ai";
 
 export const CREATE_NOVEL_WORKFLOW_STEPS = [
   "expand_idea_to_full_novel_story",
@@ -207,6 +209,14 @@ export const CREATE_FACTIONS_WORKFLOW_STEPS = [
   "create_core_factions",
 ] as const;
 
+export const CREATE_CORE_CHARACTERS_WORKFLOW_STEPS = [
+  "create_core_characters",
+] as const;
+
+export const CREATE_CHARACTER_RELATIONS_WORKFLOW_STEPS = [
+  "create_character_relations",
+] as const;
+
 export const WORKFLOW_STEPS = CREATE_NOVEL_WORKFLOW_STEPS;
 
 export const WORKFLOW_DEFINITIONS: readonly WorkflowDefinition[] = [
@@ -217,6 +227,14 @@ export const WORKFLOW_DEFINITIONS: readonly WorkflowDefinition[] = [
   {
     name: CREATE_FACTIONS_WORKFLOW_NAME,
     steps: CREATE_FACTIONS_WORKFLOW_STEPS,
+  },
+  {
+    name: CREATE_CORE_CHARACTERS_WORKFLOW_NAME,
+    steps: CREATE_CORE_CHARACTERS_WORKFLOW_STEPS,
+  },
+  {
+    name: CREATE_CHARACTER_RELATIONS_WORKFLOW_NAME,
+    steps: CREATE_CHARACTER_RELATIONS_WORKFLOW_STEPS,
   },
 ] as const;
 

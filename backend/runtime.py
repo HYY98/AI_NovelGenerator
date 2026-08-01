@@ -7,11 +7,57 @@ import sys
 from typing import Any, Iterable
 
 BACKEND_DEBUG_ENV_VAR = "NOVEL_GENERATOR_BACKEND_DEBUG"
+BACKEND_PORT_ENV_VAR = "NOVEL_GENERATOR_BACKEND_PORT"
+FRONTEND_PORT_ENV_VAR = "NOVEL_GENERATOR_FRONTEND_PORT"
+DEFAULT_BACKEND_PORT = 8200
+DEFAULT_FRONTEND_PORT = 3300
 _TRUE_VALUES = {"1", "true", "yes", "on", "debug"}
 
 
 def _is_truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in _TRUE_VALUES
+
+
+def _get_port_from_env(env_name: str, default_port: int) -> int:
+    raw_value = os.getenv(env_name, str(default_port)).strip()
+    try:
+        port = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{env_name} 必须是整数，当前值为 {raw_value!r}") from exc
+
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{env_name} 必须位于 1 到 65535 之间，当前值为 {port}")
+    return port
+
+
+def get_backend_port() -> int:
+    """读取并校验后端监听端口。
+
+    Args:
+        无。
+
+    Returns:
+        环境变量指定的有效 TCP 端口；未指定时返回项目默认端口。
+
+    Raises:
+        ValueError: 环境变量不是整数或超出有效端口范围。
+    """
+    return _get_port_from_env(BACKEND_PORT_ENV_VAR, DEFAULT_BACKEND_PORT)
+
+
+def get_frontend_port() -> int:
+    """读取并校验前端监听端口。
+
+    Args:
+        无。
+
+    Returns:
+        环境变量指定的有效 TCP 端口；未指定时返回项目默认端口。
+
+    Raises:
+        ValueError: 环境变量不是整数或超出有效端口范围。
+    """
+    return _get_port_from_env(FRONTEND_PORT_ENV_VAR, DEFAULT_FRONTEND_PORT)
 
 
 def apply_runtime_flags_from_argv(argv: Iterable[str] | None = None) -> bool:

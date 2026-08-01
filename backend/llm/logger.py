@@ -85,6 +85,47 @@ def log_llm_response(response: LLMResponse) -> None:
         )
 
 
+def log_llm_stream_response(
+    *,
+    provider: str,
+    model: str,
+    chunks: list[str],
+    error: BaseException | None = None,
+) -> None:
+    """记录 LLM 流式响应的原始分块与拼接文本。
+
+    Args:
+        provider: 当前 Provider 别名。
+        model: 当前请求使用的模型名称。
+        chunks: 已收到的流式文本分块。
+        error: 可选的流式中断异常。
+
+    Returns:
+        无。
+    """
+    if not is_backend_debug_enabled():
+        return
+
+    content = "".join(chunks)
+    payload: dict[str, Any] = {
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+        "content": content,
+    }
+    if error is not None:
+        payload["error"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+
+    logger.debug(
+        "[LLM 流式原始响应] provider=%s model=%s payload=\n%s",
+        provider,
+        model,
+        _format_debug_payload(payload),
+    )
+
+
 def log_provider_test_raw_response(provider: str, capability: str, payload: Any) -> None:
     """记录 Provider 能力测试阶段的原始响应。
 

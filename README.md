@@ -79,9 +79,11 @@ start.bat
 
 This starts the desktop launcher, which can then start:
 
-- backend: `http://127.0.0.1:8000`
-- API docs: `http://127.0.0.1:8000/docs`
-- frontend: `http://localhost:3000`
+- backend: `http://127.0.0.1:8200`
+- API docs: `http://127.0.0.1:8200/docs`
+- frontend: `http://127.0.0.1:3300`
+
+The launcher toolbar can persist custom backend and frontend ports, which default to 8200 and 3300. Ports are editable only while both services are stopped; the launcher keeps backend CORS, the frontend API base URL, and actual listen arguments synchronized, and detects Windows-excluded ports before launch.
 
 ### Option 2: Run backend manually
 
@@ -101,19 +103,27 @@ When you use the Windows launcher, you can enable the backend checkbox labeled `
 
 ```bash
 cd frontend
-npm run dev
+npm run dev -- --hostname 127.0.0.1 --port 3300
 ```
 
 ## Tests
 
-Example test commands:
+Database tests:
 
 ```bash
-python -m tests.test_volumes
-python -m tests.test_llm openai
+python -m pytest tests -q
 ```
 
-Some tests require local services or valid model credentials.
+Run individual database test files:
+
+```bash
+python -m pytest tests/test_mongo_transaction.py -q
+python -m pytest tests/test_volumes.py -q
+python -m pytest tests/test_factions.py -q
+python -m pytest tests/test_core_factions.py -q
+```
+
+API tests require the MongoDB settings in `backend/config/config.yaml` to be reachable.
 
 ## Notes
 

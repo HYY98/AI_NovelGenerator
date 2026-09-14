@@ -126,7 +126,7 @@ async def request_validation_exception_handler(
 # CORS 与启动器选定的前端端口保持一致，同时兼容 localhost 与 IPv4 回环地址。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8200";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
 /** 普通 JSON 请求可选配置。 */
 export interface ApiRequestOptions {

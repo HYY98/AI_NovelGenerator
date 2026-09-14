@@ -7,8 +7,15 @@ const isProduction = process.env.NODE_ENV === "production";
 const nextConfig: NextConfig = {
   reactCompiler: true,
   typescript: {
-    // 生产构建不应读取可能由上次 dev 强制中断而残留的开发路由声明。
     tsconfigPath: isProduction ? "tsconfig.build.json" : "tsconfig.json",
+  },
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: "http://127.0.0.1:8200/api/:path*",
+      },
+    ];
   },
 };
 

@@ -1,38 +1,43 @@
-# 小说工作台 Web 版
+# AI_NovelGenerator Web
+
+Web 界面按原 CustomTkinter 桌面布局迁移，业务实现仍在 `novel_generator/`、`llm_adapters.py`、`embedding_adapters.py`、`consistency_checker.py`。`web_tasks.py` 负责从原配置选择模型并调用这些原函数，不替换原生成算法或提示词。
 
 ## 启动
 
-需要 Python 3.10 或更新版本。Web 编辑功能只使用 Python 标准库，无需安装桌面版、向量库或模型 SDK。
-
-在项目目录运行：
+Python 3.10+。卡片、章节和设定文件编辑只需标准库；AI 生成与 WebDAV 使用项目原 `requirements.txt` 依赖。工作区 `.deps` 存在时由服务载入。
 
 ```powershell
-python web_server.py
+python web_server.py --port 17777
 ```
 
-或运行 `powershell -ExecutionPolicy Bypass -File .\start_web.ps1`。
+打开 http://127.0.0.1:17777 。也可运行 `start_web.ps1` 并传入 `--port` 参数。只监听本机，不用于公开托管。
 
-浏览器打开 http://127.0.0.1:8765 。端口被占用时可使用 `python web_server.py --port 8766`。
+## 原界面对应关系
 
-## 功能与数据
+- Main Functions：左侧本章正文、四步生成和批量生成、日志；右侧四个嵌套配置标签、小说参数与可选操作。
+- Novel Architecture：原 `Novel_architecture.txt`。
+- Chapter Blueprint：原 `Novel_directory.txt`。
+- Character State：原 `character_state.txt`。
+- Global Summary：原 `global_summary.txt`。
+- 章节编辑：原 `chapters/chapter_编号.txt`。
+- 设定卡库：地点卡、物品卡、规则设定卡，共用 `setting_cards.json`。
+- Other Settings：原 WebDAV 配置与备份、恢复操作。
 
-- 章节编辑：新建、加载、保存、删除、查找替换、撤销重做、字数统计、前后章切换。
-- 地点卡、物品卡、规则设定卡：结构化编辑、搜索、新建删除、启用停用、JSON 导入导出。
-- 项目切换：输入服务器本机的小说目录。默认目录是项目下的 `Novel_Src`。
-- 未保存内容会在切换编辑对象或离开页面时提醒；文件被外部修改时阻止旧版本覆盖。
+原 `config.json` 是应用级配置，不随小说目录改变位置。模型选择仍使用 `choose_configs` 中的原阶段选择，Embedding 使用原选择项。Step3 先生成可编辑提示词，确认后生成草稿；Step4 使用当前编辑正文，再调用原定稿流程更新摘要、角色状态与向量库。批量生成按章节顺序调用原草稿和定稿函数。
 
-Web 与桌面版共用 `setting_cards.json` 和 `chapters/chapter_编号.txt`，无需转换格式。未保存的浏览器内容不参与桌面版生成；已保存且启用的卡片会由现有桌面生成和审校流程读取。
+## 保存与安全
 
-本次 Web 版本覆盖卡片管理和章节编辑。原桌面版的模型配置、架构生成、批量生成、定稿及向量库管理尚未迁入网页，仍通过 `start_local.ps1` 使用。
+编辑器保存检查文件版本并原子替换；后台生成时阻止并发修改项目，以避免网页与生成线程相互覆盖。外部编辑仍可能使版本失效，此时先保留编辑内容再重新加载合并。手工保存正文不自动更新摘要和向量库，需执行原定稿流程。
 
-## 安全边界
+API 密钥、WebDAV 密码只在服务端保存，配置读取返回空字段与“已配置”状态。保存时空值表示保留旧密钥，清除需要明确操作。配置损坏时报告错误，不用默认配置静默覆盖。WebDAV 备份和原桌面版一样会向用户配置的服务器上传包含密钥的配置，必须确认目标可信后再操作。
 
-服务仅供本机个人使用，默认监听 `127.0.0.1`。不要直接发布到公网或通过代理开放给不可信用户。当前没有多用户身份认证；项目路径指向服务端本机目录。请求有来源检查与跨页面项目版本校验，但不替代账号权限系统。
+本机服务没有多用户账号权限，不要暴露公网。不要将 `config.json`、日志、小说文件或授权工具提交到仓库。浏览目录与知识库路径均指运行 Python 的电脑，不是远程浏览器的电脑。
 
-请勿将含密钥的 `config.json`、小说正文或卡片库提交到公开仓库。Web 版不提供密码/API 密钥输入，也不会将桌面模型配置返回浏览器。
-
-## 验证
+## 验证命令
 
 ```powershell
-python -m unittest discover -s tests -p test_web_server.py -v
+python -m unittest discover -s tests -p 'test_web*.py' -v
+node --check web/app.js
 ```
+
+离线测试通过模拟原 API 检查实际参数签名与流程；真实模型质量、网络可达性和远程 WebDAV 服务仍需有效账号及连接验证。

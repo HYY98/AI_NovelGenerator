@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from bson import ObjectId
 
 from backend.db.base import BaseRepository
-from backend.db.utils import to_object_id
+from backend.db.utils import to_object_id, get_utc_now
 from backend.db.errors import NotFoundError, DuplicateKeyError
 from backend.db.repositories.id_sequence_repository import id_sequence_repo
 
@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 # 章节状态：草稿 / 修改中 / 已定稿
 CHAPTER_STATUS = ("draft", "editing", "finalized")
 STATUS_LABEL = {"draft": "草稿", "editing": "修改中", "finalized": "已定稿"}
+
+# 合法状态流转：已定稿只能重开为修改中，不能直接回草稿
+STATUS_TRANSITIONS = {
+    "draft": {"editing", "finalized"},
+    "editing": {"draft", "finalized"},
+    "finalized": {"editing"},
+}
 
 
 def serialize(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -104,10 +111,8 @@ class ChapterRepository(BaseRepository):
         existing = await self.get_chapter(chapter_id, session=session)
         if existing.get("status") == "finalized" and data.get("content") is not None:
             raise DuplicateKeyError("章节已定稿，如需修改请先转回修改中状态")
-        if expected_version is not None and existing.get("version", 1) != expected_version:
-            raise DuplicateKeyError(
-                f"章节已在其他页面被修改（服务器版本 {existing.get('version')}，当前基于版本 {expected_version}），请刷新"
-            )
+        # 乐观锁基准：显式 expected_version 优先，否则以刚读到的版本为基准（仍走原子条件更新）
+        base_version = expected_version if expected_version is not None else existing.get("version", 1)
         # 改章节号时检查唯一
         if "number" in data and data["number"] != existing["number"]:
             conflict = await self.find_one(
@@ -116,17 +121,39 @@ class ChapterRepository(BaseRepository):
             )
             if conflict:
                 raise DuplicateKeyError(f"第 {data['number']} 章已存在")
-        if "content" in data:
-            data["word_count"] = len(re.sub(r"\s", "", data["content"] or ""))
-        if "volume_id" in data and data["volume_id"]:
-            data["volume_id"] = to_object_id(data["volume_id"])
-        data["version"] = existing.get("version", 1) + 1
-        await self.update_one({"_id": ObjectId(chapter_id)}, data, session=session)
+        # 待写入字段（version 一律由 $inc 原子自增，不允许外部直接写）
+        set_fields: Dict[str, Any] = {k: v for k, v in data.items() if k != "version"}
+        if "content" in set_fields:
+            set_fields["word_count"] = len(re.sub(r"\s", "", set_fields["content"] or ""))
+        if "volume_id" in set_fields and set_fields["volume_id"]:
+            set_fields["volume_id"] = to_object_id(set_fields["volume_id"])
+        # 原子条件更新：版本号匹配才写入并 +1，两个窗口并发时后写不会覆盖先写
+        flt = {"_id": ObjectId(chapter_id), "is_deleted": False, "version": base_version}
+        update = {
+            "$set": {**set_fields, "updated_at": get_utc_now()},
+            "$inc": {"version": 1},
+        }
+        result = await self.collection.update_one(flt, update, session=session)
+        if result.matched_count == 0:
+            latest = await self.collection.find_one({"_id": ObjectId(chapter_id)}, session=session)
+            if not latest:
+                raise NotFoundError(f"章节不存在: {chapter_id}")
+            raise DuplicateKeyError(
+                f"章节已在其他页面被修改（服务器版本 {latest.get('version')}，当前基于版本 {base_version}），请刷新后重试"
+            )
         return await self.get_chapter(chapter_id, session=session)
 
     async def change_status(self, chapter_id, status: str, session=None):
         if status not in CHAPTER_STATUS:
             raise DuplicateKeyError(f"非法章节状态: {status}")
+        existing = await self.get_chapter(chapter_id, session=session)
+        cur = existing.get("status", "draft")
+        if status == cur:
+            return existing
+        if status not in STATUS_TRANSITIONS.get(cur, set()):
+            raise DuplicateKeyError(
+                f"不允许从「{STATUS_LABEL.get(cur, cur)}」直接改为「{STATUS_LABEL.get(status, status)}」"
+            )
         return await self.update_chapter(chapter_id, {"status": status}, session=session)
 
     async def soft_delete_chapter(self, chapter_id, session=None) -> bool:

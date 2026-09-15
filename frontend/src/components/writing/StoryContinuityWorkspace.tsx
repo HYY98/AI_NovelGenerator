@@ -552,6 +552,21 @@ const STATUS_LABEL: Record<ChapterStatus, string> = {
   finalized: "已定稿",
 };
 
+// 状态下拉可选项：已定稿后不允许直接回草稿，只能重开为修改中
+const statusOptionsFor = (s: ChapterStatus): { value: ChapterStatus; label: string }[] => {
+  if (s === "finalized") {
+    return [
+      { value: "finalized", label: "已定稿" },
+      { value: "editing", label: "重新打开为修改中" },
+    ];
+  }
+  return [
+    { value: "draft", label: "草稿" },
+    { value: "editing", label: "修改中" },
+    { value: "finalized", label: "已定稿" },
+  ];
+};
+
 interface Chapter {
   _id: string;
   chapter_id: string;
@@ -727,18 +742,23 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
   }, []);
 
   const changeStatus = async (status: ChapterStatus) => {
-    if (!current) return;
+    if (!current || status === current.status) return;
     try {
       if (status === "finalized") {
+        if (!window.confirm("确定将本章定稿吗？定稿后正文将锁定，需重新打开为「修改中」才能继续编辑。")) return;
         const saved = await apiPost<Chapter>(`/api/chapters/${current._id}/finalize`, {});
         setCurrent(saved);
-      } else if (status === "editing") {
+        await loadList();
+      } else if (status === "editing" && current.status === "finalized") {
+        // 已定稿重新打开需要确认，走 reopen；后端同样禁止定稿直接回草稿
+        if (!window.confirm("重新打开后本章变为「修改中」，可以继续编辑正文。确定吗？")) return;
         const saved = await apiPost<Chapter>(`/api/chapters/${current._id}/reopen`, {});
         setCurrent(saved);
+        await loadList();
       } else {
+        // 草稿 <-> 修改中 之间切换走普通自动保存
         scheduleSave({ status });
       }
-      await loadList();
     } catch (e) {
       setError(errMsg(e, "状态更新失败"));
     }
@@ -956,9 +976,9 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
                       value={current.status}
                       onChange={(e) => changeStatus(e.target.value as ChapterStatus)}
                     >
-                      <option value="draft">草稿</option>
-                      <option value="editing">修改中</option>
-                      <option value="finalized">已定稿</option>
+                      {statusOptionsFor(current.status).map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
                     </select>
                     <button onClick={() => gotoNeighbor("prev")} className="rounded-lg border border-border px-3 py-2 text-sm">
                       上一章

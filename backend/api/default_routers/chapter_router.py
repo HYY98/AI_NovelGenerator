@@ -40,6 +40,8 @@ class SaveChapterRequest(BaseModel):
 
 
 def _handle(e):
+    if isinstance(e, HTTPException):
+        raise e
     if isinstance(e, NotFoundError):
         raise HTTPException(404, str(e))
     if isinstance(e, InvalidIdError):

@@ -7,7 +7,7 @@ from bson import ObjectId
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from backend.db.base import BaseRepository
-from backend.db.utils import to_object_id
+from backend.db.utils import to_object_id, get_utc_now
 from backend.db.errors import NotFoundError, DuplicateKeyError
 from backend.db.repositories.id_sequence_repository import id_sequence_repo
 
@@ -162,23 +162,35 @@ class SettingCardRepository(BaseRepository):
 
     async def update_card(self, novel_id, card_id, data: Dict[str, Any], expected_version=None, session=None):
         existing = await self.get_card_by_oid(novel_id, card_id, session=session)
-        if expected_version is not None and existing.get("version", 1) != expected_version:
-            raise DuplicateKeyError(
-                f"卡片已被其他页面修改（服务器版本 {existing.get('version')}，当前基于版本 {expected_version}），请刷新后重试"
-            )
-        data["version"] = existing.get("version", 1) + 1
-        if "current_state" in data and data["current_state"] != existing.get("current_state"):
+        # 乐观锁基准：显式 expected_version 优先，否则以刚读到的版本为基准（仍走原子条件更新）
+        base_version = expected_version if expected_version is not None else existing.get("version", 1)
+        # version 一律由 $inc 原子自增，不允许外部直接写
+        set_fields: Dict[str, Any] = {k: v for k, v in data.items() if k != "version"}
+        if "current_state" in set_fields and set_fields["current_state"] != existing.get("current_state"):
             history = list(existing.get("state_history", []))
             history.append({
                 "from": existing.get("current_state", ""),
-                "to": data["current_state"],
-                "note": data.pop("_state_note", ""),
-                "chapter": data.pop("_state_chapter", ""),
+                "to": set_fields["current_state"],
+                "note": set_fields.pop("_state_note", ""),
+                "chapter": set_fields.pop("_state_chapter", ""),
             })
-            data["state_history"] = history
-        await self.update_one(
-            {"_id": ObjectId(card_id), "novel_id": to_object_id(novel_id)}, data, session=session
-        )
+            set_fields["state_history"] = history
+        # 原子条件更新：版本号匹配才写入并 +1，并发时后写不会覆盖先写
+        flt = {
+            "_id": ObjectId(card_id),
+            "novel_id": to_object_id(novel_id),
+            "is_deleted": False,
+            "version": base_version,
+        }
+        update = {"$set": {**set_fields, "updated_at": get_utc_now()}, "$inc": {"version": 1}}
+        result = await self.collection.update_one(flt, update, session=session)
+        if result.matched_count == 0:
+            latest = await self.collection.find_one({"_id": ObjectId(card_id)}, session=session)
+            if not latest:
+                raise NotFoundError(f"卡片不存在: {card_id}")
+            raise DuplicateKeyError(
+                f"卡片已被其他页面修改（服务器版本 {latest.get('version')}，当前基于版本 {base_version}），请刷新后重试"
+            )
         return await self.get_card_by_oid(novel_id, card_id, session=session)
 
     async def soft_delete_card(self, novel_id, card_id, session=None) -> bool:

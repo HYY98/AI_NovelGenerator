@@ -7,6 +7,7 @@ import WritingPlaceholder from "./WritingPlaceholder";
 import NovelInfoWorkspace from "./novel-info/NovelInfoWorkspace";
 import FactionCardsWorkspace from "./factions/FactionCardsWorkspace";
 import CharacterCardsWorkspace from "./characters/CharacterCardsWorkspace";
+import { CardWorkspace, ChapterEditorWorkspace } from "./StoryContinuityWorkspace";
 
 interface WritingContentProps {
   mode: "create" | "edit";
@@ -39,6 +40,10 @@ export default function WritingContent({ mode, novelId }: WritingContentProps) {
     if (activeItem === "relationship-map") {
       return <CharacterCardsWorkspace mode={mode} novelId={novelId} initialView="relations" />;
     }
+    if (activeItem === "chapter-editor") return <ChapterEditorWorkspace novelId={novelId} />;
+    if (activeItem === "location-cards") return <CardWorkspace type="location" novelId={novelId} />;
+    if (activeItem === "item-cards") return <CardWorkspace type="item" novelId={novelId} />;
+    if (activeItem === "rule-cards") return <CardWorkspace type="rule" novelId={novelId} />;
     return <WritingPlaceholder moduleKey={activeItem} />;
   };
 

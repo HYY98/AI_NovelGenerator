@@ -111,6 +111,16 @@ class ChapterRepository(BaseRepository):
         existing = await self.get_chapter(chapter_id, session=session)
         if existing.get("status") == "finalized" and data.get("content") is not None:
             raise DuplicateKeyError("章节已定稿，如需修改请先转回修改中状态")
+        # 普通保存同样不允许绕过状态机非法跳转（如已定稿直接回草稿）
+        if "status" in data and data["status"] != existing.get("status"):
+            tgt = data["status"]
+            cur = existing.get("status", "draft")
+            if tgt not in CHAPTER_STATUS:
+                raise DuplicateKeyError(f"非法章节状态: {tgt}")
+            if tgt not in STATUS_TRANSITIONS.get(cur, set()):
+                raise DuplicateKeyError(
+                    f"不允许从「{STATUS_LABEL.get(cur, cur)}」直接改为「{STATUS_LABEL.get(tgt, tgt)}」"
+                )
         # 乐观锁基准：显式 expected_version 优先，否则以刚读到的版本为基准（仍走原子条件更新）
         base_version = expected_version if expected_version is not None else existing.get("version", 1)
         # 改章节号时检查唯一

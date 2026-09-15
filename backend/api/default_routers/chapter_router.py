@@ -30,6 +30,7 @@ class SaveChapterRequest(BaseModel):
     number: Optional[int] = None
     title: Optional[str] = None
     content: Optional[str] = None
+    status: Optional[str] = None
     blueprint_snapshot: Optional[Dict[str, Any]] = None
     linked_character_ids: Optional[List[str]] = None
     linked_location_ids: Optional[List[str]] = None

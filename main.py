@@ -18,6 +18,8 @@ from backend.api.default_routers.faction_router import router as faction_router
 from backend.api.default_routers.faction_relation_router import router as faction_relation_router
 from backend.api.default_routers.character_router import router as character_router
 from backend.api.default_routers.character_relation_router import router as character_relation_router
+from backend.api.default_routers.setting_card_router import router as setting_card_router
+from backend.api.default_routers.chapter_router import router as chapter_router
 from backend.api.default_routers.character_faction_binding_router import (
     router as character_faction_binding_router,
 )
@@ -143,6 +145,8 @@ app.include_router(faction_relation_router)
 app.include_router(character_router)
 app.include_router(character_relation_router)
 app.include_router(character_faction_binding_router)
+app.include_router(setting_card_router)
+app.include_router(chapter_router)
 app.include_router(config_router)
 app.include_router(create_novel_router)
 app.include_router(character_generation_router)

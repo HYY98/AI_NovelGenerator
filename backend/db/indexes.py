@@ -1707,6 +1707,190 @@ async def init_id_sequence_indexes() -> None:
         raise
 
 
+async def _create_indexes_leniently(
+    collection: AsyncCollection,
+    indexes: list[pymongo.IndexModel],
+    label: str,
+) -> None:
+    """为已存在的旧集合补索引，冲突时只告警不阻断启动。
+
+    Args:
+        collection: 需要创建索引的 MongoDB 集合。
+        indexes: 待创建的索引模型列表。
+        label: 日志中使用的集合标签。
+
+    Returns:
+        无。
+
+    Raises:
+        Exception: 索引构建失败且原因不是数据冲突时原样抛出。
+    """
+    try:
+        await collection.create_indexes(indexes)
+        logger.info("成功初始化'%s'集合的索引。", label)
+    except OperationFailure as exc:
+        # 旧数据可能已违反新约束（重复业务 ID / 重名卡片），此时不能阻断后端启动。
+        logger.warning(
+            "初始化'%s'集合索引失败（历史数据可能违反新约束，已跳过）：%s", label, exc
+        )
+
+
+async def init_generation_record_indexes() -> None:
+    """初始化 AI 生成记录集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["generation_records"]
+        indexes = [
+            # 业务 ID 在同一小说内唯一
+            pymongo.IndexModel(
+                [("novel_id", 1), ("generation_id", 1)],
+                unique=True,
+                name="generation_records_novel_generation_unique",
+            ),
+            # 客户端幂等 ID 在同一小说同一生成类型下唯一，防止重复提交产生重复候选。
+            # 注意：MongoDB partial 索引不支持 $ne，因此只在存在 request_id 时建索引，
+            # 仓储层在 request_id 为空时不会写入该字段。
+            pymongo.IndexModel(
+                [("novel_id", 1), ("kind", 1), ("request_id", 1)],
+                unique=True,
+                partialFilterExpression={"request_id": {"$type": "string"}},
+                name="generation_records_request_idempotency_unique",
+            ),
+            # 章节生成历史
+            pymongo.IndexModel(
+                [("novel_id", 1), ("chapter_id", 1), ("kind", 1), ("created_at", -1)],
+                name="generation_records_chapter_kind_created",
+            ),
+            # 卡片生成历史
+            pymongo.IndexModel(
+                [("novel_id", 1), ("card_id", 1), ("created_at", -1)],
+                name="generation_records_card_created",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("is_deleted", 1), ("created_at", -1)],
+                name="generation_records_novel_active_created",
+            ),
+        ]
+        # 索引构建失败不能阻断后端启动：缺失索引只影响性能与约束强度，日志里能看到原因
+        await _create_indexes_leniently(collection, indexes, "generation_records")
+    except Exception as exc:
+        logger.error("初始化generation_records索引失败：%s", exc)
+        raise
+
+
+async def init_story_event_indexes() -> None:
+    """初始化故事事件集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["story_events"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("event_id", 1)],
+                unique=True,
+                name="story_events_novel_event_unique",
+            ),
+            # 定稿前按章节拉取待确认变更
+            pymongo.IndexModel(
+                [("novel_id", 1), ("chapter_id", 1), ("status", 1)],
+                name="story_events_chapter_status",
+            ),
+            # 按实体追溯事实时间线
+            pymongo.IndexModel(
+                [("novel_id", 1), ("entity_type", 1), ("entity_id", 1), ("created_at", 1)],
+                name="story_events_entity_timeline",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("is_deleted", 1), ("status", 1), ("created_at", -1)],
+                name="story_events_novel_status_created",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "story_events")
+    except Exception as exc:
+        logger.error("初始化story_events索引失败：%s", exc)
+        raise
+
+
+async def init_chapter_indexes() -> None:
+    """初始化章节集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["chapters"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("chapter_id", 1)],
+                unique=True,
+                name="chapters_novel_chapter_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("number", 1)],
+                unique=True,
+                partialFilterExpression={"is_deleted": False},
+                name="chapters_active_novel_number_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("is_deleted", 1), ("number", 1)],
+                name="chapters_novel_active_number",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "chapters")
+    except Exception as exc:
+        logger.error("初始化chapters索引失败：%s", exc)
+        raise
+
+
+async def init_setting_card_indexes() -> None:
+    """初始化设定卡集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["setting_cards"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("card_id", 1)],
+                unique=True,
+                name="setting_cards_novel_card_unique",
+            ),
+            # 同一小说同一类型下名称唯一（仅约束活动卡片）
+            pymongo.IndexModel(
+                [("novel_id", 1), ("type", 1), ("name", 1)],
+                unique=True,
+                partialFilterExpression={"is_deleted": False},
+                name="setting_cards_active_novel_type_name_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("type", 1), ("is_deleted", 1), ("sort_order", 1)],
+                name="setting_cards_novel_type_active_sort",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "setting_cards")
+    except Exception as exc:
+        logger.error("初始化setting_cards索引失败：%s", exc)
+        raise
+
+
 async def init_all_indexes():
     """初始化所有数据库索引。"""
     await init_novel_indexes()
@@ -1717,3 +1901,7 @@ async def init_all_indexes():
     await init_character_relation_indexes()
     await init_character_faction_binding_indexes()
     await init_id_sequence_indexes()
+    await init_chapter_indexes()
+    await init_setting_card_indexes()
+    await init_generation_record_indexes()
+    await init_story_event_indexes()

@@ -2,7 +2,11 @@
 from typing import Any, Dict, List, Optional
 
 from backend.db.utils import to_object_id
-from backend.db.repositories.setting_card_repository import SettingCardRepository, CARD_TYPES
+from backend.db.repositories.setting_card_repository import (
+    CARD_TYPES,
+    SettingCardRepository,
+    coerce_hard_rule_flag,
+)
 from backend.db.errors import InvalidIdError, DuplicateKeyError
 
 
@@ -51,6 +55,11 @@ class SettingCardService:
             raise DuplicateKeyError(f"{CARD_TYPES[card_type]['label']}名称已存在: {name}")
         data["name"] = name
         data["fields"] = self._normalize_fields(card_type, data.get("fields", {}))
+        # 规则卡的 is_hard_rule 统一落成布尔语义，供章节生成强制注入与审校使用
+        if card_type == "rule":
+            data["is_hard_rule"] = coerce_hard_rule_flag(
+                data["fields"].get("is_hard_rule")
+            )
         data["aliases"] = self._normalize_str_list(data.get("aliases"))
         data["tags"] = self._normalize_str_list(data.get("tags"))
         data["importance"] = max(1, min(5, int(data.get("importance", 3) or 3)))
@@ -66,6 +75,10 @@ class SettingCardService:
                 raise DuplicateKeyError(f"卡片名称已存在: {data['name']}")
         if "fields" in data:
             data["fields"] = self._normalize_fields(existing["type"], data["fields"])
+            if existing.get("type") == "rule":
+                data["is_hard_rule"] = coerce_hard_rule_flag(
+                    data["fields"].get("is_hard_rule")
+                )
         if "aliases" in data:
             data["aliases"] = self._normalize_str_list(data["aliases"])
         if "tags" in data:

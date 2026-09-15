@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiPost, apiPut, apiDelete, ApiRequestError } from "@/lib/api";
+import { useSaveQueue } from "@/lib/saveQueue";
+import type { CardCandidate } from "@/lib/aiTypes";
+import ChapterAIPanel, { type ChapterAIApplyPatch } from "./ai/ChapterAIPanel";
+import CardAIPanel from "./ai/CardAIPanel";
 
 type CardType = "location" | "item" | "rule";
 
@@ -110,12 +114,59 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
   const [query, setQuery] = useState("");
   const [showDeleted, setShowDeleted] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<string | null>(null);
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [novelSourceText, setNovelSourceText] = useState("");
   const cardsRef = useRef<Card[]>([]);
   cardsRef.current = cards;
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selected;
+
+  // 保存队列：切卡前必须 flush，保证改动写到正确的卡片而不是被带到下一张
+  const queue = useSaveQueue<Card>({
+    debounceMs: 600,
+    onSave: async (patchObj, baseVersion) => {
+      const cardOid = selectedRef.current;
+      if (!cardOid || !novelId) throw new Error("卡片尚未就绪");
+      const source = patchObj as Record<string, unknown>;
+      const body: Record<string, unknown> = {};
+      for (const key of [
+        "name",
+        "aliases",
+        "fields",
+        "enabled",
+        "importance",
+        "first_appearance_chapter",
+        "current_state",
+        "tags",
+      ] as const) {
+        if (key in source) body[key] = source[key];
+      }
+      const saved = await apiPut<Card>(
+        `/api/setting-cards/${novelId}/${cardOid}?expected_version=${baseVersion}`,
+        body
+      );
+      setCards((prev) =>
+        prev.map((c) =>
+          c._id === saved._id
+            ? { ...c, version: saved.version, state_history: saved.state_history }
+            : c
+        )
+      );
+      return saved.version;
+    },
+    onSaved: () => {
+      setNotice("已自动保存 " + new Date().toLocaleTimeString());
+      setConflict(null);
+    },
+    onConflict: (message) => setConflict(message),
+    onError: (message) => setError(message),
+  });
+  // effect 里只通过 ref 访问队列，避免每次渲染都重建 loadCards
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
 
   const loadCards = useCallback(async () => {
     if (!novelId) {
@@ -129,8 +180,15 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
         `/api/setting-cards/${novelId}?type=${type}&include_deleted=${showDeleted}`
       );
       // 回收站视图只展示已软删除的卡片
-      setCards(showDeleted ? list.filter((c) => c.is_deleted) : list);
-      setSelected((prev) => (prev && list.some((c) => c._id === prev) ? prev : null));
+      const nextCards = showDeleted ? list.filter((c) => c.is_deleted) : list;
+      const nextSelected =
+        selectedRef.current && nextCards.some((c) => c._id === selectedRef.current)
+          ? selectedRef.current
+          : null;
+      setCards(nextCards);
+      setSelected(nextSelected);
+      const target = nextCards.find((c) => c._id === nextSelected);
+      if (target) queueRef.current.setBaseVersion(target.version);
     } catch (e) {
       setError(errMsg(e, "加载失败"));
     } finally {
@@ -159,7 +217,7 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
       setError("请先保存小说后再添加卡片");
       return;
     }
-    setSaving(true);
+    setBusy(true);
     setError(null);
     try {
       const card = await apiPost<Card>(`/api/setting-cards/${novelId}`, {
@@ -173,56 +231,68 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
       });
       setCards((prev) => [...prev, card]);
       setSelected(card._id);
+      queueRef.current.setBaseVersion(card.version);
     } catch (e) {
       setError(errMsg(e, "创建失败"));
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
 
-  // 本地即时更新 + 防抖整体保存（带乐观锁版本）
+  // 提取功能需要原文：懒加载小说基础信息作为默认来源
+  useEffect(() => {
+    if (!novelId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const novel = await apiGet<Record<string, unknown>>(`/api/novels/${novelId}`);
+        if (cancelled) return;
+        const labels: [string, string][] = [
+          ["worldview", "世界观"],
+          ["plot", "主线剧情"],
+          ["core_idea", "核心创意"],
+          ["era_background", "时代背景"],
+          ["writing_style", "写作风格"],
+          ["introduction", "简介"],
+          ["summary", "故事梗概"],
+        ];
+        const parts = labels
+          .map(([key, label]) => {
+            const value = novel[key];
+            return typeof value === "string" && value.trim() ? `【${label}】\n${value}` : "";
+          })
+          .filter(Boolean);
+        setNovelSourceText(parts.join("\n\n"));
+      } catch {
+        // 提取来源加载失败不影响手动编辑
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [novelId]);
+
+  // 本地即时更新 + 防抖写回（走保存队列，带乐观锁版本）
   const patch = (change: Partial<Card>) => {
     if (!current || current.is_deleted) return;
     setConflict(null);
     setCards((prev) => prev.map((c) => (c._id === current._id ? { ...c, ...change } : c)));
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      const latest = cardsRef.current.find((c) => c._id === current._id);
-      if (!latest) return;
-      setSaving(true);
-      try {
-        const saved = await apiPut<Card>(
-          `/api/setting-cards/${novelId}/${latest._id}?expected_version=${latest.version}`,
-          {
-            name: latest.name,
-            aliases: latest.aliases,
-            fields: latest.fields,
-            enabled: latest.enabled,
-            importance: latest.importance,
-            first_appearance_chapter: latest.first_appearance_chapter,
-            current_state: latest.current_state,
-            tags: latest.tags,
-          }
-        );
-        // 只回写版本与状态历史，避免覆盖用户正在输入的内容
-        setCards((prev) =>
-          prev.map((c) =>
-            c._id === latest._id
-              ? { ...c, version: saved.version, state_history: saved.state_history }
-              : c
-          )
-        );
-        setConflict(null);
-      } catch (e) {
-        if (e instanceof ApiRequestError && e.status === 409) {
-          setConflict(e.message);
-        } else {
-          setError(errMsg(e, "保存失败"));
-        }
-      } finally {
-        setSaving(false);
+    queue.schedule(change);
+  };
+
+  // 切换卡片前必须先 flush，避免未落库的改动被写到另一张卡
+  const selectCard = async (id: string) => {
+    if (id !== selected) {
+      const ok = await queueRef.current.flush();
+      if (!ok) {
+        setError("当前卡片还有未保存的改动，请先处理保存冲突再切换");
+        return;
       }
-    }, 600);
+      queueRef.current.reset();
+    }
+    setSelected(id);
+    const target = cardsRef.current.find((c) => c._id === id);
+    if (target) queueRef.current.setBaseVersion(target.version);
   };
 
   const patchField = (key: string, value: string) => {
@@ -237,6 +307,7 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
         `/api/setting-cards/${novelId}/${current._id}?include_deleted=true`
       );
       setCards((prev) => prev.map((c) => (c._id === fresh._id ? fresh : c)));
+      if (selectedRef.current === fresh._id) queueRef.current.setBaseVersion(fresh.version);
       setConflict(null);
     } catch (e) {
       setError(errMsg(e, "重新加载失败"));
@@ -245,7 +316,7 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
 
   const forceOverwrite = async () => {
     if (!current || !novelId) return;
-    setSaving(true);
+    setBusy(true);
     try {
       const saved = await apiPut<Card>(`/api/setting-cards/${novelId}/${current._id}`, {
         name: current.name,
@@ -258,11 +329,57 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
         tags: current.tags,
       });
       setCards((prev) => prev.map((c) => (c._id === saved._id ? saved : c)));
+      queueRef.current.setBaseVersion(saved.version);
       setConflict(null);
     } catch (e) {
       setError(errMsg(e, "覆盖失败"));
     } finally {
-      setSaving(false);
+      setBusy(false);
+    }
+  };
+
+  // ------------------------------------------------------------------
+  // AI 采纳
+  // ------------------------------------------------------------------
+  const applyCardFields = (fields: Record<string, string>, note: string) => {
+    if (!current) return;
+    const nextFields = { ...current.fields };
+    for (const [key, value] of Object.entries(fields)) {
+      if (value && value.trim()) nextFields[key] = value;
+    }
+    patch({ fields: nextFields });
+    setNotice(`${note}：字段已写入卡片并进入自动保存`);
+  };
+
+  const createCardFromCandidate = async (candidate: CardCandidate) => {
+    if (!novelId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const isKnown = (["location", "item", "rule"] as string[]).includes(candidate.type);
+      const targetType = (isKnown ? candidate.type : type) as CardType;
+      const created = await apiPost<Card>(`/api/setting-cards/${novelId}`, {
+        type: targetType,
+        name: candidate.name,
+        aliases: candidate.aliases,
+        fields: { ...emptyFields(targetType), ...candidate.fields },
+        enabled: true,
+        importance: candidate.importance || 3,
+        current_state: candidate.current_state || "",
+        tags: [],
+      });
+      await loadCards();
+      if (created._id && targetType === type) {
+        setSelected(created._id);
+        queueRef.current.setBaseVersion(created.version);
+        setNotice(`已创建卡片「${created.name}」`);
+      } else {
+        setNotice(`已创建${CARD_SCHEMA[targetType].title}「${created.name}」，请切换到对应标签查看`);
+      }
+    } catch (e) {
+      setError(errMsg(e, "创建候选卡片失败"));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -331,10 +448,24 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
             {showDeleted ? "← 返回正常列表" : "回收站"}
           </button>
           <span className="text-xs text-muted">
-            {saving ? "保存中…" : loading ? "加载中…" : showDeleted ? `回收站 ${cards.length} 张` : `共 ${cards.length} 张`}
+            {queue.state === "saving"
+              ? "保存中…"
+              : queue.state === "dirty"
+                ? "待保存…"
+                : loading
+                  ? "加载中…"
+                  : showDeleted
+                    ? `回收站 ${cards.length} 张`
+                    : `共 ${cards.length} 张`}
           </span>
         </div>
       </div>
+
+      {notice && (
+        <div className="rounded-lg border border-border bg-surface-secondary px-4 py-2 text-sm text-muted">
+          {notice}
+        </div>
+      )}
 
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">{error}</div>
@@ -365,7 +496,7 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
               />
               <button
                 onClick={create}
-                disabled={saving}
+                disabled={busy}
                 className="shrink-0 rounded-lg bg-accent px-3 py-2 text-sm text-white disabled:opacity-50"
               >
                 新增
@@ -379,7 +510,7 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
               visible.map((card) => (
                 <button
                   key={card._id}
-                  onClick={() => setSelected(card._id)}
+                  onClick={() => void selectCard(card._id)}
                   className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm ${
                     selected === card._id ? "bg-accent/10 text-accent" : "hover:bg-surface-secondary"
                   }`}
@@ -536,6 +667,23 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
               选择一张卡片开始编辑，或点击「新增」创建
             </div>
           )}
+
+          {!showDeleted && (
+            <div className="mt-4">
+              <CardAIPanel
+                novelId={novelId}
+                cardType={type}
+                card={current && !current.is_deleted ? current : null}
+                fieldLabels={schema.fields}
+                sourceText={novelSourceText}
+                sourceDocument="novel_info"
+                sourceDocumentLabel="小说基础信息"
+                onApplyFields={applyCardFields}
+                onCreateCard={(candidate) => void createCardFromCandidate(candidate)}
+                onError={(message) => setError(message)}
+              />
+            </div>
+          )}
         </div>
       </div>
     </section>
@@ -582,6 +730,7 @@ interface Chapter {
   linked_rule_ids: string[];
   summary: string;
   unresolved_threads: string[];
+  blueprint_snapshot?: Record<string, unknown>;
   version: number;
   is_deleted?: boolean;
   deleted_at?: string | null;
@@ -596,7 +745,6 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
   const [list, setList] = useState<Chapter[]>([]);
   const [current, setCurrent] = useState<Chapter | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [savedTip, setSavedTip] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<string | null>(null);
@@ -610,10 +758,48 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
     rules: LinkOption[];
   }>({ characters: [], locations: [], items: [], rules: [] });
 
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentRef = useRef<Chapter | null>(null);
-  const pendingRef = useRef<Partial<Chapter>>({});
   currentRef.current = current;
+  // 关联 tag 的连续点选基于本地累积值，避免快速点击互相覆盖
+  const linksRef = useRef<Partial<Chapter>>({});
+  const [selection, setSelection] = useState<{ start: number; end: number; text: string } | null>(
+    null
+  );
+  const [finalizeSignal, setFinalizeSignal] = useState(0);
+
+  // 章节保存队列：切换章节与定稿前必须 flush，避免请求串到目标章节
+  const queue = useSaveQueue<Chapter>({
+    debounceMs: 700,
+    onSave: async (patchObj, baseVersion) => {
+      const chapterId = currentRef.current?._id;
+      if (!chapterId) throw new Error("章节尚未就绪");
+      const saved = await apiPut<Chapter>(
+        `/api/chapters/${chapterId}?expected_version=${baseVersion}`,
+        patchObj
+      );
+      setCurrent((prev) =>
+        prev && prev._id === saved._id
+          ? { ...prev, version: saved.version, word_count: saved.word_count }
+          : prev
+      );
+      // 同步左侧列表的标题与状态
+      setList((prev) =>
+        prev.map((c) =>
+          c._id === saved._id ? { ...c, title: saved.title, status: saved.status } : c
+        )
+      );
+      return saved.version;
+    },
+    onSaved: () => {
+      linksRef.current = {};
+      setConflict(null);
+      setSavedTip("已自动保存 " + new Date().toLocaleTimeString());
+    },
+    onConflict: (message) => setConflict(message),
+    onError: (message) => setError(message),
+  });
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
 
   const loadList = useCallback(async () => {
     if (!novelId) {
@@ -681,9 +867,21 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
   const openChapter = async (id: string) => {
     setConflict(null);
     setError(null);
+    // 切换章节前先把当前章节的改动落库，避免请求串到目标章节
+    if (currentRef.current && currentRef.current._id !== id) {
+      const saved = await queueRef.current.flush();
+      if (!saved) {
+        setError("当前章节还有未保存的改动，请先处理保存冲突再切换");
+        return;
+      }
+      queueRef.current.reset();
+      linksRef.current = {};
+      setSelection(null);
+    }
     try {
       const ch = await apiGet<Chapter>(`/api/chapters/${id}?include_deleted=true`);
       setCurrent(ch);
+      queueRef.current.setBaseVersion(ch.version);
     } catch (e) {
       setError(errMsg(e, "章节加载失败"));
     }
@@ -691,85 +889,130 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
 
   const createChapter = async () => {
     if (!novelId) return;
+    // 新建同样要先落库，否则待保存改动会串到新章节
+    if (currentRef.current) {
+      const saved = await queueRef.current.flush();
+      if (!saved) {
+        setError("当前章节还有未保存的改动，请先处理保存冲突再新建");
+        return;
+      }
+      queueRef.current.reset();
+    }
     try {
       const ch = await apiPost<Chapter>(`/api/chapters/novel/${novelId}/create`, {});
       await loadList();
       setCurrent(ch);
+      queueRef.current.setBaseVersion(ch.version);
+      linksRef.current = {};
+      setSelection(null);
     } catch (e) {
       setError(errMsg(e, "新建章节失败"));
     }
   };
 
-  // 防抖自动保存（带乐观锁）；连续修改不同字段时累积变更，避免前一次改动被清掉
-  const scheduleSave = useCallback((patchObj: Partial<Chapter>) => {
-    if (!currentRef.current) return;
-    setCurrent((prev) => (prev ? { ...prev, ...patchObj } : prev));
-    setConflict(null);
-    Object.assign(pendingRef.current, patchObj);
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      const latest = currentRef.current;
-      if (!latest) {
-        pendingRef.current = {};
-        return;
-      }
-      const body = { ...pendingRef.current };
-      pendingRef.current = {};
-      setSaving(true);
-      try {
-        const saved = await apiPut<Chapter>(
-          `/api/chapters/${latest._id}?expected_version=${latest.version}`,
-          body
-        );
-        setCurrent((prev) =>
-          prev ? { ...prev, version: saved.version, word_count: saved.word_count } : prev
-        );
-        // 同步左侧列表的标题与状态
-        setList((prev) =>
-          prev.map((c) => (c._id === saved._id ? { ...c, title: saved.title, status: saved.status } : c))
-        );
-        setConflict(null);
-        setSavedTip("已自动保存 " + new Date().toLocaleTimeString());
-      } catch (e) {
-        // 保存失败，把变更放回待保存队列，下次编辑重试
-        Object.assign(pendingRef.current, body);
-        if (e instanceof ApiRequestError && e.status === 409) setConflict(e.message);
-        else setError(errMsg(e, "保存失败"));
-      } finally {
-        setSaving(false);
-      }
-    }, 700);
-  }, []);
+  // 本地即时更新 + 防抖写回；连续修改不同字段时累积为同一个 patch
+  const scheduleSave = useCallback(
+    (patchObj: Partial<Chapter>) => {
+      if (!currentRef.current) return;
+      setCurrent((prev) => (prev ? { ...prev, ...patchObj } : prev));
+      setConflict(null);
+      queueRef.current.schedule(patchObj);
+    },
+    []
+  );
+
+  // 采用 AI 候选：统一走保存队列，仍受乐观锁保护
+  const applyAIPatch = (patch: ChapterAIApplyPatch) => {
+    const cur = currentRef.current;
+    if (!cur) return;
+    const updates: Partial<Chapter> = {};
+    let baseContent = cur.content;
+    if (patch.replaceAll !== undefined) baseContent = patch.replaceAll;
+    if (patch.replaceRange) {
+      const { start, end, text } = patch.replaceRange;
+      baseContent = cur.content.slice(0, start) + text + cur.content.slice(end);
+      setSelection(null);
+    }
+    if (patch.append) {
+      const separator = baseContent && !baseContent.endsWith("\n") ? "\n\n" : "";
+      baseContent = `${baseContent}${separator}${patch.append}`;
+    }
+    if (baseContent !== cur.content) updates.content = baseContent;
+    if (patch.title) updates.title = patch.title;
+    if (patch.summary !== undefined) updates.summary = patch.summary;
+    if (patch.unresolvedThreads) updates.unresolved_threads = patch.unresolvedThreads;
+    if (patch.blueprint) {
+      updates.blueprint_snapshot = patch.blueprint as unknown as Record<string, unknown>;
+    }
+    if (!Object.keys(updates).length) return;
+    scheduleSave(updates);
+    setSavedTip("已采用 AI 候选，正在保存…");
+  };
+
+  const handleSelection = (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    const element = event.currentTarget;
+    const start = element.selectionStart ?? 0;
+    const end = element.selectionEnd ?? 0;
+    if (end <= start) {
+      setSelection(null);
+      return;
+    }
+    setSelection({ start, end, text: element.value.slice(start, end) });
+  };
 
   const changeStatus = async (status: ChapterStatus) => {
     if (!current || status === current.status) return;
     try {
       if (status === "finalized") {
-        if (!window.confirm("确定将本章定稿吗？定稿后正文将锁定，需重新打开为「修改中」才能继续编辑。")) return;
-        const saved = await apiPost<Chapter>(`/api/chapters/${current._id}/finalize`, {});
-        setCurrent(saved);
-        await loadList();
-      } else if (status === "editing" && current.status === "finalized") {
+        // 定稿不是改个状态：先落库正文，再走审校 + 状态变更确认流程
+        const saved = await queueRef.current.flush();
+        if (!saved) {
+          setError("正文还有未保存的改动，请先保存成功后再定稿");
+          return;
+        }
+        setSavedTip("请在「AI 写作助手」中确认定稿");
+        setFinalizeSignal((prev) => prev + 1);
+        return;
+      }
+      if (status === "editing" && current.status === "finalized") {
         // 已定稿重新打开需要确认，走 reopen；后端同样禁止定稿直接回草稿
         if (!window.confirm("重新打开后本章变为「修改中」，可以继续编辑正文。确定吗？")) return;
         const saved = await apiPost<Chapter>(`/api/chapters/${current._id}/reopen`, {});
         setCurrent(saved);
+        queueRef.current.setBaseVersion(saved.version);
         await loadList();
-      } else {
-        // 草稿 <-> 修改中 之间切换走普通自动保存
-        scheduleSave({ status });
+        return;
       }
+      // 草稿 <-> 修改中 之间切换走普通自动保存
+      scheduleSave({ status });
     } catch (e) {
       setError(errMsg(e, "状态更新失败"));
     }
+  };
+
+  /** 放弃本地未保存改动，重新加载服务器版本。 */
+  const reloadFromServer = async () => {
+    if (!current) return;
+    queueRef.current.reset();
+    linksRef.current = {};
+    setSelection(null);
+    await openChapter(current._id);
   };
 
   const removeChapter = async () => {
     if (!current) return;
     if (!window.confirm(`确定删除第 ${current.number} 章「${current.title}」吗？（可在章节回收站恢复）`)) return;
     try {
+      // 先落库再删除，避免删除后仍有排队中的写入打到已删章节
+      const flushed = await queueRef.current.flush();
+      if (!flushed) {
+        setError("还有未保存的改动，请先处理保存冲突再删除");
+        return;
+      }
       await apiDelete(`/api/chapters/${current._id}`);
+      queueRef.current.reset();
       setCurrent(null);
+      setSelection(null);
       await loadList();
     } catch (e) {
       setError(errMsg(e, "删除失败"));
@@ -815,9 +1058,10 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
   ) => {
     const cur = currentRef.current;
     if (!cur) return;
-    // 优先基于尚未 flush 的待保存值，保证快速连续点选同一分组不丢失
-    const base = (pendingRef.current[field] as string[] | undefined) || cur[field] || [];
+    // 优先基于尚未落库的本地累积值，保证快速连续点选同一分组不丢失
+    const base = (linksRef.current[field] as string[] | undefined) ?? cur[field] ?? [];
     const next = base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
+    linksRef.current[field] = next;
     scheduleSave({ [field]: next } as Partial<Chapter>);
   };
 
@@ -869,14 +1113,20 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col gap-3 bg-background p-5 md:p-6">
+    <section className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto bg-background p-4 md:p-6 lg:overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">章节编辑</h1>
           <p className="mt-1 text-sm text-muted">逐章维护正文，自动保存草稿，定稿前做一致性检查。</p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted">
-          {saving ? "保存中…" : savedTip}
+          {queue.state === "saving"
+            ? "保存中…"
+            : queue.state === "dirty"
+              ? "待保存…"
+              : queue.state === "conflict"
+                ? "存在版本冲突"
+                : savedTip}
         </div>
       </div>
 
@@ -887,10 +1137,10 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
         <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-700">
           版本冲突：{conflict}
           <button
-            onClick={() => current && openChapter(current._id)}
+            onClick={() => void reloadFromServer()}
             className="ml-3 rounded border border-amber-400 px-2 py-0.5 text-xs"
           >
-            重新加载服务器版本
+            放弃本地修改，加载服务器版本
           </button>
         </div>
       )}
@@ -949,7 +1199,7 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
         </aside>
 
         {/* 中：正文编辑 */}
-        <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
           {current ? (
             <>
               <div className="flex flex-wrap items-center gap-2">
@@ -1030,6 +1280,7 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
                 value={current.content}
                 readOnly={readOnly}
                 onChange={(e) => scheduleSave({ content: e.target.value })}
+                onSelect={handleSelection}
                 placeholder={
                   deleted
                     ? "该章节已删除，可点击「恢复章节」找回"
@@ -1043,6 +1294,19 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
             <div className="flex min-h-40 flex-1 items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted">
               从左侧选择章节，或点击「新建章节」
             </div>
+          )}
+
+          {current && !deleted && (
+            <ChapterAIPanel
+              novelId={novelId}
+              chapter={current}
+              selection={selection}
+              flush={() => queueRef.current.flush()}
+              onApply={applyAIPatch}
+              onReload={() => void openChapter(current._id)}
+              onError={(message) => setError(message)}
+              finalizeSignal={finalizeSignal}
+            />
           )}
         </div>
 

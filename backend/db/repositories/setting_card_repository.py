@@ -75,6 +75,28 @@ CARD_TYPES: Dict[str, Dict[str, Any]] = {
 }
 
 
+# 规则卡 is_hard_rule 的历史文本取值，服务层统一转换成布尔语义
+_TRUE_TEXT_VALUES = frozenset({"1", "true", "yes", "y", "on", "是", "硬规则", "必须"})
+
+
+def coerce_hard_rule_flag(value: Any) -> bool:
+    """把规则卡 is_hard_rule 的任意历史取值转换成布尔语义。
+
+    Args:
+        value: 历史文本（如 "是"/"否"/"true"）或布尔值。
+
+    Returns:
+        命中硬规则取值时返回 True，其余返回 False。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in _TRUE_TEXT_VALUES
+
+
 def serialize(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """把文档中的 ObjectId 全部转成字符串，便于 JSON 序列化。"""
     if not doc:
@@ -128,6 +150,52 @@ class SettingCardRepository(BaseRepository):
             raise NotFoundError(f"卡片不存在: {card_id}")
         return serialize(doc)
 
+    async def get_card_by_business_id(
+        self,
+        novel_id,
+        card_id: str,
+        include_deleted: bool = False,
+        session=None,
+    ) -> Dict[str, Any]:
+        """按业务 ID（loc_/itm_/rul_）读取卡片。
+
+        Args:
+            novel_id: 小说 ObjectId 或字符串。
+            card_id: 卡片业务 ID。
+            include_deleted: 是否包含软删除卡片。
+            session: 可选 MongoDB 会话。
+
+        Returns:
+            命中的卡片文档。
+
+        Raises:
+            NotFoundError: 卡片不存在时抛出。
+        """
+        doc = await self.find_one(
+            {"novel_id": to_object_id(novel_id), "card_id": card_id},
+            include_deleted=include_deleted,
+            session=session,
+        )
+        if not doc:
+            raise NotFoundError(f"卡片不存在: {card_id}")
+        return serialize(doc)
+
+    async def list_cards_by_ids(
+        self,
+        novel_id,
+        card_ids: List[str],
+        session=None,
+    ) -> List[Dict[str, Any]]:
+        """按业务 ID 列表批量读取卡片。"""
+        cleaned = [item for item in dict.fromkeys(card_ids) if item]
+        if not cleaned:
+            return []
+        docs = await self.find_many(
+            {"novel_id": to_object_id(novel_id), "card_id": {"$in": cleaned}},
+            session=session,
+        )
+        return [serialize(d) for d in docs]
+
     async def name_exists(self, novel_id, card_type, name, exclude_oid=None, session=None) -> bool:
         flt: Dict[str, Any] = {
             "novel_id": to_object_id(novel_id),
@@ -157,6 +225,11 @@ class SettingCardRepository(BaseRepository):
             "sort_order": data.get("sort_order", 0),
             "version": 1,
         }
+        # 规则卡额外保存布尔语义的硬规则标记，兼容历史文本值
+        if card_type == "rule":
+            doc["is_hard_rule"] = coerce_hard_rule_flag(
+                data.get("is_hard_rule", (data.get("fields") or {}).get("is_hard_rule"))
+            )
         oid = await self.insert_one(doc, session=session)
         return await self.get_card_by_oid(novel_id, oid, session=session)
 

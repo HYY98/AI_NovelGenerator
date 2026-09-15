@@ -85,6 +85,82 @@ REQUIRED_PROMPT_SECTIONS: dict[str, tuple[str, ...]] = {
     CHARACTER_RELATIONS_PROMPT_NAME: REQUIRED_CHARACTER_RELATIONS_PROMPT_KEYS,
 }
 
+# 设定卡与章节 AI 的提示词分组。
+# 这些分组刻意不进入 REQUIRED_PROMPT_SECTIONS：用户既有的自定义 prompt.yaml
+# 可能还没有它们，强行要求会让整个自定义提示词文件校验失败并整体回退。
+# 运行时通过 get_prompt_section() 按分组从默认文件补齐，缺失才报错。
+EXTENDED_PROMPT_NAMES: tuple[str, ...] = (
+    "generate_setting_card",
+    "complete_setting_card",
+    "extract_setting_cards",
+    "check_card_conflicts",
+    "chapter_plan",
+    "chapter_draft",
+    "chapter_continue",
+    "chapter_rewrite",
+    "chapter_expand",
+    "chapter_compress",
+    "consistency_review",
+    "propose_state_changes",
+)
+
+EXTENDED_PROMPT_SECTIONS: dict[str, tuple[str, ...]] = {
+    name: (
+        f"{name}_prompt_base",
+        f"{name}_prompt_with_schema_suffix",
+        f"{name}_prompt_without_schema_suffix",
+    )
+    for name in EXTENDED_PROMPT_NAMES
+}
+
+# 扩展分组参与占位符校验的键（suffix 模板按原文追加，不做格式化，因此不校验）
+EXTENDED_PROMPT_TEMPLATE_FIELDS: dict[str, set[str]] = {
+    "generate_setting_card_prompt_base": {
+        "card_type_label",
+        "context_text",
+        "existing_cards_json",
+        "field_spec",
+        "user_prompt",
+    },
+    "complete_setting_card_prompt_base": {
+        "card_type_label",
+        "card_type",
+        "context_text",
+        "card_json",
+        "empty_fields",
+        "locked_fields",
+        "user_prompt",
+    },
+    "extract_setting_cards_prompt_base": {
+        "source_document",
+        "source_text",
+        "existing_cards_json",
+    },
+    "check_card_conflicts_prompt_base": {
+        "card_type",
+        "card_json",
+        "related_cards_json",
+    },
+    "chapter_plan_prompt_base": {"context_text"},
+    "chapter_draft_prompt_base": {"context_text", "plan_json", "target_words"},
+    "chapter_continue_prompt_base": {
+        "context_text",
+        "plan_json",
+        "tail_text",
+        "target_words",
+    },
+    "chapter_rewrite_prompt_base": {
+        "context_text",
+        "instruction",
+        "locked_facts",
+        "selection_text",
+    },
+    "chapter_expand_prompt_base": {"context_text", "instruction", "selection_text"},
+    "chapter_compress_prompt_base": {"context_text", "instruction", "selection_text"},
+    "consistency_review_prompt_base": {"context_text", "content"},
+    "propose_state_changes_prompt_base": {"context_text", "content"},
+}
+
 PROMPT_TEMPLATE_FIELDS: dict[str, set[str]] = {
     "expand_idea_to_full_novel_story_prompt_base": {"user_idea"},
     "extract_idea_prompt_base": {"plot"},
@@ -154,6 +230,9 @@ PROMPT_TEMPLATE_FIELDS: dict[str, set[str]] = {
     },
     "function_result_probe_prompt": {"probe_token", "tool_result"},
 }
+
+# 扩展分组的 base 模板同样参与占位符校验
+PROMPT_TEMPLATE_FIELDS.update(EXTENDED_PROMPT_TEMPLATE_FIELDS)
 
 logger = logging.getLogger(__name__)
 
@@ -495,6 +574,119 @@ def load_llm_provider_test_prompts(
         section_name=LLM_PROVIDER_TEST_PROMPT_NAME,
         required_keys=REQUIRED_LLM_PROVIDER_TEST_PROMPT_KEYS,
     )
+
+
+def _collect_section(
+    data: dict[str, Any],
+    section_name: str,
+    keys: tuple[str, ...],
+) -> dict[str, str]:
+    """从提示词数据中取出指定分组的非空字符串键。
+
+    Args:
+        data: 已解析的提示词 YAML 数据。
+        section_name: 分组名。
+        keys: 需要读取的键名。
+
+    Returns:
+        存在且非空的键值字典。
+    """
+    section = data.get(section_name)
+    if not isinstance(section, dict):
+        return {}
+    collected: dict[str, str] = {}
+    for key in keys:
+        value = section.get(key)
+        if isinstance(value, str) and value.strip():
+            collected[key] = value
+    return collected
+
+
+def get_prompt_section(
+    section_name: str,
+    *,
+    force_reload: bool = False,
+) -> dict[str, str]:
+    """读取扩展提示词分组，缺失项从默认提示词文件补齐。
+
+    Args:
+        section_name: 扩展分组名，见 EXTENDED_PROMPT_SECTIONS。
+        force_reload: 为 True 时清空缓存并重新读取磁盘文件。
+
+    Returns:
+        含该分组全部必需键的提示词字典。
+
+    Raises:
+        PromptConfigError: 分组未定义，或默认文件也无法补齐必需键时抛出。
+    """
+    required = EXTENDED_PROMPT_SECTIONS.get(section_name)
+    if required is None:
+        raise PromptConfigError(f"未定义的提示词分组: {section_name}")
+
+    selection = get_prompt_selection(force_reload=force_reload)
+    merged = _collect_section(selection.data, section_name, required)
+    missing = [key for key in required if key not in merged]
+    if missing:
+        # 用户自定义 prompt.yaml 通常只覆盖业务创作部分，新增分组按分组回退默认文件即可。
+        default_data = _read_yaml_mapping(DEFAULT_PROMPT_PATH)
+        merged.update(_collect_section(default_data, section_name, tuple(missing)))
+
+    still_missing = [key for key in required if key not in merged]
+    if still_missing:
+        raise PromptConfigError(
+            f"提示词分组 {section_name} 缺少必填内容: {', '.join(still_missing)}"
+        )
+    return {key: merged[key] for key in required}
+
+
+def check_extended_prompts(*, force_reload: bool = False) -> list[str]:
+    """校验扩展提示词分组的完整性，返回问题描述而不抛异常。
+
+    Args:
+        force_reload: 为 True 时清空缓存并重新读取磁盘文件。
+
+    Returns:
+        可直接写入日志的问题列表；一切正常时返回空列表。
+    """
+    problems: list[str] = []
+    default_data = _read_yaml_mapping(DEFAULT_PROMPT_PATH)
+    selection = get_prompt_selection(force_reload=force_reload)
+
+    for section_name, keys in EXTENDED_PROMPT_SECTIONS.items():
+        missing_in_default = [
+            key for key in keys if key not in _collect_section(default_data, section_name, keys)
+        ]
+        if missing_in_default:
+            problems.append(
+                f"{DEFAULT_PROMPT_FILENAME} 分组 {section_name} 缺少: {', '.join(missing_in_default)}"
+            )
+        if not selection.is_default:
+            active = _collect_section(selection.data, section_name, keys)
+            if len(active) < len(keys):
+                problems.append(
+                    f"{selection.path.name} 分组 {section_name} 不完整，缺失项将回退默认提示词"
+                )
+
+    for key, expected_fields in EXTENDED_PROMPT_TEMPLATE_FIELDS.items():
+        section_name = key[: -len("_prompt_base")]
+        template = _collect_section(selection.data, section_name, (key,)).get(key)
+        if template is None:
+            template = _collect_section(default_data, section_name, (key,)).get(key)
+        if template is None:
+            continue
+        try:
+            format_fields = _extract_format_fields(template)
+        except PromptConfigError as exc:
+            problems.append(f"{key} {exc}")
+            continue
+        missing_fields = expected_fields - format_fields
+        unknown_fields = format_fields - expected_fields
+        if missing_fields:
+            problems.append(f"{key} 缺少占位符: {', '.join(sorted(missing_fields))}")
+        if unknown_fields:
+            problems.append(f"{key} 包含未支持的占位符: {', '.join(sorted(unknown_fields))}")
+
+    return problems
 
 
 def main() -> int:

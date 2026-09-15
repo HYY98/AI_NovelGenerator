@@ -25,7 +25,11 @@ from backend.api.default_routers.character_faction_binding_router import (
 )
 from backend.api.llm_routers.create_novel_router import router as create_novel_router
 from backend.api.llm_routers.character_generation_router import router as character_generation_router
-from backend.llm.prompts.prompt_selector import load_prompt_config
+from backend.api.llm_routers.chapter_generation_router import router as chapter_generation_router
+from backend.api.llm_routers.setting_card_generation_router import (
+    router as setting_card_generation_router,
+)
+from backend.llm.prompts.prompt_selector import check_extended_prompts, load_prompt_config
 from backend.runtime import (
     apply_runtime_flags_from_argv,
     build_uvicorn_log_config,
@@ -66,6 +70,9 @@ async def lifespan(app: FastAPI):
     )
     # 启动早期读取一次提示词配置，让自定义 prompt.yaml 的错误能立刻出现在控制台日志中。
     load_prompt_config(force_reload=True)
+    # 章节/设定卡 AI 的提示词分组只告警不阻断启动：缺失项会回退默认提示词。
+    for problem in check_extended_prompts(force_reload=True):
+        logger.warning("章节/设定卡 AI 提示词检查: %s", problem)
     # Setup Mongo
     await connect_to_mongo()
     # Initialize DB Indexes
@@ -150,6 +157,8 @@ app.include_router(chapter_router)
 app.include_router(config_router)
 app.include_router(create_novel_router)
 app.include_router(character_generation_router)
+app.include_router(chapter_generation_router)
+app.include_router(setting_card_generation_router)
 app.include_router(upload_router)
 
 if __name__ == "__main__":

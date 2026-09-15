@@ -497,3 +497,342 @@ create_character_relations_by_ai:
         }
       ]
     }
+
+# ============================================================
+# 设定卡 AI 能力（地点 / 物品 / 规则）
+# 说明：base 模板会被 str.format 渲染，suffix 模板按原文追加（不做格式化）。
+# ============================================================
+generate_setting_card:
+  generate_setting_card_prompt_base: |
+    你是长篇小说设定管理助手，负责为当前正在写作的小说补一张「{card_type_label}」。
+
+    【当前小说与章节上下文】
+    {context_text}
+
+    【已有同类卡片（禁止重名，禁止重复设定）】
+    {existing_cards_json}
+
+    【本类型可用字段（fields 的键只能用这些）】
+    {field_spec}
+
+    【用户需求】
+    {user_prompt}
+
+    硬性规则：
+    1. 只输出 1 张卡片候选，name 必须具体、可读，且不得与已有同类卡片或其别名重复。
+    2. fields 只能使用上面列出的字段键，值必须是非空字符串；没有把握的字段直接省略或留空。
+    3. current_state 必须从该卡类型允许的状态列表中选取。
+    4. importance 是 1 到 5 的整数，表示该设定对全书的重要程度。
+    5. reason 用一句话说明这张卡对当前章节的叙事作用。
+    6. conflicts 列出与已有设定可能冲突的点，没有冲突时给空数组。
+    7. 你只产出候选内容，不会直接写入正式设定；不得虚构与上下文冲突的既有事实。
+    8. 如果用户需求与已有设定矛盾，仍然给出候选，但必须在 conflicts 中说明矛盾。
+  generate_setting_card_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 candidates 与 notes，不要输出解释或 Markdown。
+  generate_setting_card_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"candidates":[{"type":"location","name":"名称","aliases":["别名"],"fields":{"字段键":"字段值"},"current_state":"状态","importance":3,"reason":"生成理由","conflicts":[],"source":"ai_generated"}],"notes":""}
+
+complete_setting_card:
+  complete_setting_card_prompt_base: |
+    你是长篇小说设定管理助手，需要补全一张已经存在的「{card_type_label}」（type={card_type}）。
+
+    【当前小说与章节上下文】
+    {context_text}
+
+    【这张卡目前的完整内容】
+    {card_json}
+
+    【当前为空、需要你补全的字段】
+    {empty_fields}
+
+    【用户已锁定、绝对禁止返回和改写的字段】
+    {locked_fields}
+
+    【用户补充要求】
+    {user_prompt}
+
+    硬性规则：
+    1. 只能返回 filled_fields，键必须来自"需要补全的字段"，禁止新增其它键。
+    2. 锁定字段一律不得出现在 filled_fields 中。
+    3. 只补全空字段，不得改写已有内容，不得与已有字段自相矛盾。
+    4. 补全内容要与当前章节、已有设定保持一致，避免凭空升级能力或提前揭示秘密。
+    5. 如果发现这张卡与上下文存在冲突，写入 conflicts，但仍然完成补全。
+  complete_setting_card_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 filled_fields、notes 与 conflicts，不要输出解释或 Markdown。
+  complete_setting_card_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"filled_fields":{"字段键":"补全内容"},"notes":"","conflicts":[]}
+
+extract_setting_cards:
+  extract_setting_cards_prompt_base: |
+    你是长篇小说设定抽取助手。请从下面的「{source_document}」文本中，识别出值得作为正式设定卡维护的条目。
+
+    【待抽取文本】
+    {source_text}
+
+    【已有卡片（用于判断重复，禁止重复建卡）】
+    {existing_cards_json}
+
+    抽取要求：
+    1. type 只能是 location、item、rule 三者之一。
+    2. name 使用文本中出现的正式名称；aliases 记录同一事物的其它称呼。
+    3. fields 填写文本中能支撑的字段，键必须来自对应卡片类型的字段集合。
+    4. evidence 必须引用文本中的原文片段，不允许编造依据。
+    5. 如果与已有卡片是同一个事物，duplicate_of 填该卡的 card_id，suggested_action 填 merge。
+    6. 如果文本中出现了该卡片相对已有卡片的明确状态变化，state_change 用一句话说明，否则留空。
+    7. new_fields 列出相对已有卡片新增的字段名；没有就给空数组。
+    8. confidence 为 0 到 1 的小数，表示这条抽取的可信程度。
+    9. suggested_action 只能是 create、merge、skip。
+    10. 只抽取文本明确支撑的内容，不要补充文本中没有依据的设定。
+  extract_setting_cards_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 items 与 notes，不要输出解释或 Markdown。
+  extract_setting_cards_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"items":[{"type":"location","name":"名称","aliases":[],"fields":{},"evidence":"原文依据","duplicate_of":"","new_fields":[],"state_change":"","confidence":0.8,"suggested_action":"create"}],"notes":""}
+
+check_card_conflicts:
+  check_card_conflicts_prompt_base: |
+    你是小说设定一致性检查助手。请检查一张「{card_type}」卡片与当前全书设定之间是否存在冲突。
+
+    【待检查卡片】
+    {card_json}
+
+    【相关设定】
+    {related_cards_json}
+
+    检查重点：
+    1. 能力越界或能力被凭空提升。
+    2. 持有者、数量、损毁状态前后矛盾。
+    3. 与硬规则冲突。
+    4. 与已有卡片重复或语义重叠。
+    5. 同一事物存在互相矛盾的两条设定。
+
+    输出要求：
+    1. severity 只能是 blocking、warning、notice。
+    2. message 说明冲突事实，不要泛泛而谈。
+    3. related_card_ids 填涉及冲突的其它卡片业务 ID。
+    4. suggestion 给出可执行的修改建议。
+    5. 没有冲突时 conflicts 给空数组。
+  check_card_conflicts_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 conflicts 与 notes，不要输出解释或 Markdown。
+  check_card_conflicts_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"conflicts":[{"severity":"warning","message":"冲突说明","related_card_ids":["itm_000001"],"suggestion":"修改建议"}],"notes":""}
+
+# ============================================================
+# 章节 AI 生成与审校
+# ============================================================
+chapter_plan:
+  chapter_plan_prompt_base: |
+    你是长篇小说章节策划助手。请为下面这一章生成"章节剧情方案"。
+
+    【章节上下文】
+    {context_text}
+
+    输出要求：
+    1. goal 用一句话说明本章要完成的叙事任务。
+    2. conflict 说明本章的主要冲突或张力来源。
+    3. beats 给出 3 到 7 个按顺序推进的关键节拍，每个节拍是具体事件而不是抽象概括。
+    4. character_changes 说明本章中角色发生的状态或关系变化。
+    5. location_usage、item_usage 说明本章用到的地点与物品，以及使用方式。
+    6. rule_constraints 列出本章必须遵守的硬规则约束。
+    7. foreshadowing 列出本章埋下或推进的伏笔。
+    8. ending_hook 说明结尾如何推进剧情并留住读者。
+    9. 不得让角色使用尚未获得的物品，不得让物品凭空出现，不得让地点状态无故变化，
+       不得让角色知道尚未揭示的秘密，不得重复最近章节已发生过的核心事件。
+    10. 只输出方案，不要写正文。
+  chapter_plan_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出，不要输出解释、Markdown 或正文内容。
+  chapter_plan_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"title":"","goal":"","conflict":"","beats":["节拍1","节拍2","节拍3"],"character_changes":[],"location_usage":[],"item_usage":[],"rule_constraints":[],"foreshadowing":[],"ending_hook":""}
+
+chapter_draft:
+  chapter_draft_prompt_base: |
+    你是长篇小说写作者。请根据已确认的章节方案，写出这一章的正文。
+
+    【章节上下文】
+    {context_text}
+
+    【已确认的章节方案】
+    {plan_json}
+
+    本章目标字数：约 {target_words} 字。
+
+    写作要求：
+    1. 严格承接上一章结尾，不要重复上一章已经写过的内容。
+    2. 使用小说基础信息中指定的叙事视角与写作风格。
+    3. 必须遵守上下文里列出的硬规则；硬规则冲突的内容一律不能出现。
+    4. 只能使用上下文中已存在的地点、物品、能力与角色关系；不得凭空新增关键设定。
+    5. 对白与描写要有推进作用，不要写与方案无关的支线。
+    6. 结尾要落实方案中的结尾推进。
+    7. 同步输出本章摘要 summary 与仍未回收的伏笔 unresolved_threads。
+    8. used_entities 只填本章正文真正用到的业务 ID，不得填写不存在的 ID。
+    9. 如果本章产生了地点状态、物品持有者或物品状态的变化，写入 state_change_proposals，
+       并附上正文中的证据原文；没有变化就给空数组。
+    10. 直接输出正文，不要输出大纲、说明或字数统计。
+  chapter_draft_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 title、content、summary、unresolved_threads、used_entities 与 state_change_proposals。
+  chapter_draft_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"title":"","content":"章节正文","summary":"本章摘要","unresolved_threads":[],"used_entities":{"characters":[],"locations":[],"items":[],"rules":[]},"state_change_proposals":[]}
+
+chapter_continue:
+  chapter_continue_prompt_base: |
+    你是长篇小说写作者。请接着当前章节已有的正文继续往下写。
+
+    【章节上下文】
+    {context_text}
+
+    【已确认的章节方案】
+    {plan_json}
+
+    【当前章节正文结尾（只提供尾部，请不要重复这段内容）】
+    {tail_text}
+
+    续写目标字数：约 {target_words} 字。
+
+    写作要求：
+    1. 从尾部自然衔接，不要复述已写过的句子。
+    2. 保持人称、语气、节奏与上文一致。
+    3. 遵守上下文中的硬规则与既有设定。
+    4. 只输出新增部分，不要重复输出上文。
+    5. 同步更新 summary 与 unresolved_threads。
+  chapter_continue_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 content、summary 与 unresolved_threads，content 只包含新增正文。
+  chapter_continue_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"content":"新增正文","summary":"更新后的本章摘要","unresolved_threads":[]}
+
+chapter_rewrite:
+  chapter_rewrite_prompt_base: |
+    你是长篇小说编辑。请按要求改写下面这段选中的正文。
+
+    【章节上下文】
+    {context_text}
+
+    【改写要求】
+    {instruction}
+
+    【必须保持不变的既定事实】
+    {locked_facts}
+
+    【选中原文】
+    {selection_text}
+
+    改写要求：
+    1. 只改写选中片段，不要扩写无关内容，也不要改动人名、地名、物品名与既定事实。
+    2. 不改变事件结果，只调整表达方式、节奏、描写或情绪强度。
+    3. 遵守上下文中的硬规则。
+    4. rewritten_text 只输出改写后的片段本身，不要输出解释。
+    5. change_notes 说明做了哪些改动；preserved_facts 说明保留了哪些事实。
+  chapter_rewrite_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 rewritten_text、change_notes 与 preserved_facts。
+  chapter_rewrite_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"rewritten_text":"改写后的片段","change_notes":[],"preserved_facts":[]}
+
+chapter_expand:
+  chapter_expand_prompt_base: |
+    你是长篇小说写作者。请扩写下面选中的正文片段。
+
+    【章节上下文】
+    {context_text}
+
+    【扩写要求】
+    {instruction}
+
+    【选中原文】
+    {selection_text}
+
+    扩写要求：
+    1. 只做细节、动作、感官与心理的补充，不新增改变剧情走向的事件。
+    2. 不能引入上下文中不存在的新设定、新角色或新能力。
+    3. 遵守上下文中的硬规则。
+    4. expanded_text 只输出扩写后的片段本身。
+    5. added_details 说明补充了哪些细节。
+  chapter_expand_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 expanded_text 与 added_details。
+  chapter_expand_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"expanded_text":"扩写后的片段","added_details":[]}
+
+chapter_compress:
+  chapter_compress_prompt_base: |
+    你是长篇小说编辑。请压缩下面选中的正文片段，在保留关键信息的前提下减少篇幅。
+
+    【章节上下文】
+    {context_text}
+
+    【压缩要求】
+    {instruction}
+
+    【选中原文】
+    {selection_text}
+
+    压缩要求：
+    1. 保留所有既定事实、因果与关键动作，只删减冗余描写与重复表达。
+    2. 不新增任何内容。
+    3. compressed_text 只输出压缩后的片段本身。
+    4. removed_notes 说明删掉了什么。
+  chapter_compress_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 compressed_text 与 removed_notes。
+  chapter_compress_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"compressed_text":"压缩后的片段","removed_notes":[]}
+
+consistency_review:
+  consistency_review_prompt_base: |
+    你是长篇小说一致性审校助手。请检查下面的章节正文是否与已确认设定冲突。
+
+    【章节上下文（含必须遵守的硬规则）】
+    {context_text}
+
+    【待审校的章节正文】
+    {content}
+
+    检查类别（category 只能取以下之一）：
+    character_state、location_state、item_owner、item_ability、rule_conflict、timeline、foreshadowing、duplicate_plot、style
+
+    严重级别（severity 只能取以下之一）：
+    blocking（违反硬规则或既定事实，不能定稿）、warning（建议修改但允许定稿）、notice（提示）
+
+    输出要求：
+    1. 只报告有证据的问题，evidence 必须引用正文中的具体段落或句子。
+    2. 不要报告风格偏好类问题，除非确实影响可读性，且必须标为 notice。
+    3. 每条问题给出可执行的 suggestion。
+    4. can_ignore 表示用户是否可以在知晓风险后忽略该问题；blocking 一律为 false。
+    5. 没有问题的时候 issues 给空数组，不要为了凑数编造问题。
+  consistency_review_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 summary 与 issues。
+  consistency_review_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"summary":"","issues":[{"severity":"blocking","category":"rule_conflict","entity_type":"rule","entity_id":"rul_000001","message":"问题描述","evidence":"正文依据","suggestion":"修改建议","can_ignore":false}]}
+
+propose_state_changes:
+  propose_state_changes_prompt_base: |
+    你是长篇小说世界观管理助手。请从下面的章节正文中，识别出实体事实的变化候选。
+
+    【章节上下文】
+    {context_text}
+
+    【章节正文】
+    {content}
+
+    输出要求：
+    1. entity_type 只能是 character、location、item、rule。
+    2. entity_id 必须使用上下文中出现的业务 ID，禁止臆造 ID。
+    3. change_type 说明变化类型，例如 transfer（转移）、damage（损毁）、state_change（状态变化）、
+       discover（发现）、use（使用）、destroy（摧毁）、seal（封印）、lose（遗失）、recover（找回）。
+    4. before 填写变化前的值，after 填写变化后的值，键使用字段名，例如 owner、current_state、durability。
+    5. evidence 必须引用正文原文，不允许编造。
+    6. confidence 是 0 到 1 的小数。
+    7. 只报告正文中确有依据的变化，没有变化时 proposals 给空数组。
+    8. 你只产出候选，用户确认后才会写入正式设定。
+  propose_state_changes_prompt_with_schema_suffix: |
+    请严格按目标 JSON Schema 输出 proposals 与 summary。
+  propose_state_changes_prompt_without_schema_suffix: |
+    请只输出严格 JSON，不要输出解释或 Markdown。结构必须为：
+    {"proposals":[{"entity_type":"item","entity_id":"itm_000001","change_type":"transfer","before":{"owner":"苏小满"},"after":{"owner":"林嘉豪"},"evidence":"正文原文依据","confidence":0.9,"note":""}],"summary":""}
+

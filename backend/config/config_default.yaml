@@ -109,3 +109,47 @@ llm:
         create_character_relations:
           provider: openai_gpt4o_mini
           timeout_seconds: null
+    # 章节 AI：方案 → 正文 → 续写/改写/扩写/压缩 → 审校 → 状态变更候选
+    chapter_ai:
+      default_provider: openai_gpt4o_mini
+      steps:
+        chapter_plan:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        chapter_draft:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 300
+        chapter_continue:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 300
+        chapter_rewrite:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        chapter_expand:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        chapter_compress:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        consistency_review:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        propose_state_changes:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+    # 设定卡 AI：生成 / 提取 / 补全 / 冲突检查
+    setting_card_ai:
+      default_provider: openai_gpt4o_mini
+      steps:
+        generate_setting_card:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        complete_setting_card:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        extract_setting_cards:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 180
+        check_card_conflicts:
+          provider: openai_gpt4o_mini
+          timeout_seconds: 120

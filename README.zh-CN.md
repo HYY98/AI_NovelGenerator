@@ -125,6 +125,61 @@ python -m pytest tests/test_core_factions.py -q
 
 API 测试需要 `backend/config/config.yaml` 中的 MongoDB 配置可连接。
 
+## 章节与设定卡 AI 闭环
+
+AI 只产出候选，用户确认后才写入正式数据。任何"AI 直接覆盖正文/直接改设定"的实现都不应进入本分支。
+
+### 使用顺序
+
+```text
+小说信息 → 设定/角色/势力 → 章节目标与关联 → AI 生成章节方案（确认）
+        → AI 生成本章正文（采用） → 一致性审校 → 定稿确认状态变更 → 进入下一章
+```
+
+### 新增接口
+
+章节 AI（前缀 `/api/llm/chapters`，路径中的 `chapter_id` 为章节 ObjectId）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/{chapter_id}/plan` | 生成章节剧情方案候选 |
+| POST | `/{chapter_id}/draft` | 生成正文候选（不覆盖 `chapters.content`） |
+| POST | `/{chapter_id}/continue` | 续写候选，只携带当前章节尾部 |
+| POST | `/{chapter_id}/rewrite` / `expand` / `compress` | 选段改写 / 扩写 / 压缩，必须带 `selection` |
+| POST | `/{chapter_id}/review` | 结构化一致性审校（blocking / warning / notice） |
+| POST | `/{chapter_id}/propose-state-changes` | 从正文提取状态变更候选 |
+| POST | `/{chapter_id}/stream` | 统一 SSE 入口，通过 `kind` 选择生成类型 |
+| POST | `/{chapter_id}/finalize` | 定稿两阶段：`stage=review` 审校取候选，`stage=commit` 确认后落库 |
+| GET | `/{chapter_id}/pending-state-changes` | 刷新后恢复待确认列表 |
+
+设定卡 AI（前缀 `/api/llm/setting-cards`）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/generate` | 生成卡片候选 |
+| POST | `/{card_id}/complete` | 只补全空白字段，支持 `locked_fields` |
+| POST | `/extract` | 从世界观/小说信息/章节正文提取卡片 |
+| POST | `/check-conflicts` | 检查卡片与全书设定冲突 |
+
+请求统一包含 `novel_id`、`request_id`、`user_prompt`、`provider` 与扁平生成参数；响应统一为
+`{kind, candidate_id, data, source, warnings, conflicts, provider, model, context_snapshot}`。
+**`candidate_id` 只是候选，采用必须再调用正式保存接口。**
+
+### 新增集合
+
+- `generation_records`：每次生成的输入上下文版本快照、候选结果与采纳状态；`request_id` 在同一小说同一生成类型下幂等。
+- `story_events`：地点/物品/规则/角色的事实变更事件，只有 `accepted` 的事件会更新正式卡片。
+
+章节生成上下文按"当前章节可见"组装（关联实体 → 硬规则 → 最近章节摘要 → 伏笔 → 全书核心设定），
+不会注入未来章节才会发生的事实。
+
+### 验证
+
+```bash
+# 端到端验证（不调用大模型，会自建临时小说并自动清理）
+.venv/bin/python scripts/verify_chapter_ai_closure.py
+```
+
 ## 说明
 
 本 README 只描述当前重构中的项目状态。如果你要查看更早期、相对完整的版本，请直接切换到 `main` 分支查看。

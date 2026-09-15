@@ -3,6 +3,10 @@ from typing import Any, Dict, List, Optional
 
 from backend.db.repositories.chapter_repository import ChapterRepository, CHAPTER_STATUS, STATUS_LABEL
 from backend.db.errors import InvalidIdError
+from backend.services.novel.chapter_link_validator import (
+    touches_link_fields,
+    validate_and_normalize_links,
+)
 
 
 class ChapterService:
@@ -15,6 +19,8 @@ class ChapterService:
         status = data.get("status", "draft")
         if status not in CHAPTER_STATUS:
             raise InvalidIdError(f"非法状态: {status}")
+        # 新建时没有历史关联可放行，所有业务 ID 必须是当前小说的有效实体
+        data = await validate_and_normalize_links(novel_id, data)
         return await self.repo.create_chapter(novel_id, data)
 
     async def list_chapters(self, novel_id, volume_id=None, include_deleted=False):
@@ -25,6 +31,11 @@ class ChapterService:
 
     async def save_chapter(self, chapter_id, data: Dict[str, Any], expected_version=None):
         # 自动保存草稿：保存内容时若处于 draft 保持 draft，不强制改状态
+        if touches_link_fields(data):
+            existing = await self.repo.get_chapter(chapter_id, include_deleted=True)
+            data = await validate_and_normalize_links(
+                str(existing.get("novel_id")), data, existing=existing
+            )
         return await self.repo.update_chapter(chapter_id, data, expected_version)
 
     async def finalize_chapter(self, chapter_id):

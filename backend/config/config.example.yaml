@@ -1,0 +1,362 @@
+mongodb_url: mongodb://127.0.0.1:27018
+mongo_database_name: my_database
+mongo_timeout_ms: 5000
+mongo_transaction_mode: auto
+llm:
+  default_provider: teamo-gpt
+  format_review_provider: teamo-gpt-6-astra
+  providers:
+    teamo-gpt:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: gpt-5.6-sol
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-claude:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: claude-opus-5
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-gpt-6-astra:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: gpt-6-astra
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-gpt-5.6-terra:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: gpt-5.6-terra
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-claude-fable-5-1:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: claude-fable-5-1
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-claude-fable-5:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: claude-fable-5
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-gemini-3.8-flash:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: gemini-3.8-flash
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-gemini-3.7-flash:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: gemini-3.7-flash
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-gemini-3.6-flash:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: gemini-3.6-flash
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-deepseek-v4-pro:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: deepseek-v4-pro
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-deepseek-v4-flash:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: deepseek-v4-flash
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-deepseek-v4-flash-vision:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: deepseek-v4-flash-vision-exp
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-glm-5.3:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: glm-5.3
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-glm-5.2:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: glm-5.2
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-glm-5.3-flash:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: glm-5.3-flash
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+    teamo-grok-4.6:
+      type: openai
+      base_url: https://api.teamorouter.cn/v1
+      api_key: YOUR_TEAMO_API_KEY
+      default_model: grok-4.6
+      enabled: true
+      timeout_seconds: 120
+      max_retries: 2
+      max_concurrency: 5
+      use_system_proxy: false
+      supports_streaming: true
+      supports_json_schema: true
+      supports_function_calling: true
+      temperature: 0.85
+      top_p: 0.9
+      max_tokens: 3000
+      presence_penalty: 0.4
+      frequency_penalty: 0.4
+      system_prompt: 你是资深短剧编剧兼网文作家，擅长创作快节奏、强反转、高爽点的短剧剧本和小说大纲，注重情节紧凑、人物鲜明和钩子设计。
+      stream: true
+  workflows:
+    create_novel_by_ai:
+      default_provider: teamo-gpt-6-astra
+      steps:
+        expand_idea_to_full_novel_story:
+          provider: teamo-gpt-6-astra
+          timeout_seconds: null
+        extract_idea:
+          provider: teamo-gpt-6-astra
+          timeout_seconds: null
+        core_seed:
+          provider: teamo-gpt-6-astra
+          timeout_seconds: null
+        novel_meta:
+          provider: teamo-gpt-6-astra
+          timeout_seconds: null
+    create_factions_by_ai:
+      default_provider: teamo-gemini-3.8-flash
+      steps:
+        create_core_factions:
+          provider: teamo-gemini-3.8-flash
+          timeout_seconds: null
+    create_characters_by_ai:
+      default_provider: teamo-claude
+      steps:
+        create_core_characters:
+          provider: teamo-claude
+          timeout_seconds: null
+    create_character_relations_by_ai:
+      default_provider: teamo-gemini-3.8-flash
+      steps:
+        create_character_relations:
+          provider: teamo-gemini-3.8-flash
+          timeout_seconds: null

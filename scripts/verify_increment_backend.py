@@ -300,11 +300,12 @@ def main() -> int:
         "17. 正文修改建议包含修改前后文本、章节版本与范围",
     )
 
-    # 18. 确认时校验章节版本与 before_text 精确匹配
+    # 18. 确认时校验章节版本与 before_text 精确匹配（精确范围/唯一锚点定位）
     apply_src = read(text_rev_svc)
     check(
         "chapter_version != int(revision.get(\"chapter_version\")" in apply_src
-        and "before_text not in content" in apply_src,
+        and "_locate_generation_range" in apply_src
+        and "content[start:end] == before_text" in apply_src,
         "18. 确认修改建议时校验章节版本并做 before_text 精确匹配",
     )
 
@@ -430,6 +431,35 @@ def main() -> int:
             for name in ("outline", "worldbook", "context_memory")
         ),
         "30. 大纲 / 世界书 / 长期记忆集合索引已注册",
+    )
+
+    # 31. 长时生成任务与 HTTP 请求解耦，切页/刷新后可恢复
+    job_svc_src = read("backend/services/llm/generation_job_service.py")
+    job_router_src = read("backend/api/llm_routers/generation_job_router.py")
+    check(
+        "asyncio.create_task" in job_svc_src
+        and "find_resumable_job" in job_svc_src
+        and "/active" in job_router_src
+        and "/cancel" in job_router_src
+        and "generation_job_router" in main_src
+        and "await init_generation_job_indexes()" in idx_src,
+        "31. 生成任务后台执行，支持恢复查询、取消与索引注册",
+    )
+
+    # 32. 进度百分比由真实产出驱动（条目计数 + 历史样本校准）
+    workflow_src = read("backend/services/llm/workflow_service.py")
+    char_svc_src = read("backend/services/llm/character_generation_service.py")
+    char_router_src = read(
+        "backend/api/llm_routers/character_generation_router.py"
+    )
+    check(
+        all(needle in workflow_src for needle in ("item_marker", "items_done", "items_target"))
+        and '"character_ref"' in char_svc_src
+        and '"relation_ref"' in char_svc_src
+        and "item_chars_ema" in job_svc_src
+        and "prefer_stream=True" in char_router_src
+        and "/generate-core-characters/jobs" in char_router_src,
+        "32. 进度按真实条目产出统计并用历史样本校准，流式失败自动回退",
     )
 
     failed = [r for r in results if not r[0]]

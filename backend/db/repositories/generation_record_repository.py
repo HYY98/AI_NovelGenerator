@@ -750,6 +750,116 @@ class GenerationRecordRepository(BaseRepository):
         )
         return result.modified_count > 0
 
+    @staticmethod
+    def _candidate_container_path(record: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
+        """定位生成记录中的候选数组字段路径。
+
+        Args:
+            record: 生成记录。
+
+        Returns:
+            (字段路径, 候选列表)；无候选数组时路径为空字符串。
+        """
+        payload = record.get("payload") or {}
+        if isinstance(payload, dict):
+            data = (payload.get("result") or {}).get("data") or {}
+            if isinstance(data, dict) and isinstance(data.get("candidates"), list):
+                return "payload.result.data.candidates", list(data["candidates"])
+        data = (record.get("result") or {}).get("data") or {}
+        if isinstance(data, dict) and isinstance(data.get("candidates"), list):
+            return "result.data.candidates", list(data["candidates"])
+        return "", []
+
+    async def set_candidate_status(
+        self,
+        novel_id,
+        generation_id: str,
+        candidate_id: str,
+        status: str,
+        *,
+        reason: str = "",
+        operation_id: str = "",
+        expected: Optional[str] = None,
+        session=None,
+    ) -> bool:
+        """原子写入候选的采纳状态。
+
+        候选状态机：pending -> accepted/rejected/ignored（终态）。
+        通过 ``status != accepted`` 的条件更新保证并发下同一候选只能被接受一次。
+
+        Args:
+            novel_id: 小说 ObjectId 或字符串。
+            generation_id: 生成记录业务 ID。
+            candidate_id: 候选业务 ID；数组候选传稳定 ID，单候选传空字符串。
+            status: 目标状态，pending/accepted/rejected/ignored。
+            reason: 拒绝/忽略原因。
+            operation_id: 关联的幂等操作 ID。
+            expected: 可选前置状态，仅当当前状态等于该值时才写入（用于认领/释放）。
+            session: 可选 MongoDB 会话。
+
+        Returns:
+            实际更新成功返回 True；条件不满足（已被接受等）返回 False。
+        """
+        now = get_utc_now()
+        record = await self.get_owned_record(novel_id, generation_id, session=session)
+        path, candidates = self._candidate_container_path(record)
+
+        if path and candidates:
+            target_id = str(candidate_id or "").strip()
+            if not target_id:
+                return False
+            status_cond: Any = {"$ne": "accepted"} if status != "accepted" else expected
+            elem_filter: Dict[str, Any] = {"candidate_id": target_id}
+            if status_cond is not None:
+                elem_filter["status"] = status_cond
+            fields: Dict[str, Any] = {
+                f"{path}.$.status": status,
+                f"{path}.$.updated_at": now,
+                f"{path}.$.operation_id": operation_id,
+            }
+            if status == "accepted":
+                fields[f"{path}.$.accepted_at"] = now
+            if status in ("rejected", "ignored"):
+                fields[f"{path}.$.rejection_reason"] = str(reason or "")
+            if status == "pending":
+                fields[f"{path}.$.accepted_at"] = None
+            result = await self.collection.update_one(
+                {
+                    "novel_id": to_object_id(novel_id),
+                    "generation_id": generation_id,
+                    "is_deleted": False,
+                    path: {"$elemMatch": elem_filter},
+                },
+                {"$set": fields},
+                session=session,
+            )
+            return result.matched_count > 0
+
+        # 单候选：整记录即候选，状态落在 accept_status
+        status_cond: Any = {"$ne": "accepted"} if status != "accepted" else expected
+        if status_cond is None:
+            status_cond = {"$exists": False}
+        fields: Dict[str, Any] = {
+            "accept_status": status,
+            "updated_at": now,
+            "operation_id": operation_id,
+        }
+        if status == "accepted":
+            fields["accepted_at"] = now
+        if status in ("rejected", "ignored"):
+            fields["rejection_reason"] = str(reason or "")
+        result = await self.collection.update_one(
+            {
+                "novel_id": to_object_id(novel_id),
+                "generation_id": generation_id,
+                "is_deleted": False,
+                "accept_status": status_cond,
+            },
+            {"$set": fields},
+            session=session,
+        )
+        return result.matched_count > 0
+
     async def mark_accepted(self, generation_id: str, session=None) -> bool:
         """标记候选结果已被用户采用。"""
         return await self.update_one(

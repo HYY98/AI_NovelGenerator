@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.db.errors import DuplicateKeyError, InvalidIdError, NotFoundError
+from backend.api.error_contract import to_http_exception
 from backend.services.novel.setting_card_accept_service import (
     setting_card_accept_service,
 )
@@ -24,18 +24,8 @@ AcceptAction = Literal["create", "merge", "rewrite", "reject"]
 
 
 def _http_exception(exc: Exception) -> HTTPException:
-    """把服务层异常转换为稳定的 HTTP 错误。"""
-    if isinstance(exc, HTTPException):
-        return exc
-    if isinstance(exc, NotFoundError):
-        return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, InvalidIdError):
-        return HTTPException(status_code=400, detail=str(exc))
-    if isinstance(exc, DuplicateKeyError):
-        return HTTPException(status_code=409, detail=str(exc))
-    if isinstance(exc, ValueError):
-        return HTTPException(status_code=502, detail=str(exc))
-    return HTTPException(status_code=500, detail=str(exc))
+    """把服务层异常转换为统一错误契约下的 HTTP 错误。"""
+    return to_http_exception(exc)
 
 
 class SettingCardAcceptRequest(BaseModel):
@@ -45,6 +35,9 @@ class SettingCardAcceptRequest(BaseModel):
     novel_id: str = Field(min_length=1, max_length=80)
     generation_id: str = Field(min_length=1, max_length=80)
     action: AcceptAction
+    # v2.0：幂等键与候选定位，采纳类写操作必填
+    request_id: str = Field(min_length=1, max_length=120)
+    candidate_id: str = Field(default="", max_length=120)
     target_card_id: str = Field(default="", max_length=80)
     accepted_fields: Dict[str, Any] = Field(default_factory=dict)
     blueprint_version: Optional[int] = Field(default=None, ge=1)
@@ -67,6 +60,8 @@ async def accept_setting_card_candidate(request: SettingCardAcceptRequest):
             request.novel_id,
             generation_id=request.generation_id,
             action=request.action,
+            request_id=request.request_id,
+            candidate_id=request.candidate_id,
             target_card_id=request.target_card_id,
             accepted_fields=request.accepted_fields,
             blueprint_version=request.blueprint_version,

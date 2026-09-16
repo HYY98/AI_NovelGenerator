@@ -1645,6 +1645,9 @@ async def _backfill_id_sequences(db: Any) -> int:
             "character_faction_binding",
             "cfb",
         ),
+        ("novel_outlines", "outline_id", "outline", "outl"),
+        ("worldbook_entries", "entry_id", "worldbook_entry", "wb"),
+        ("context_memories", "memory_id", "context_memory", "mem"),
     )
     maximums: dict[tuple[Any, str], int] = {}
     for collection_name, id_field, entity_type, prefix in sequence_specs:
@@ -1776,6 +1779,41 @@ async def init_generation_record_indexes() -> None:
                 [("novel_id", 1), ("is_deleted", 1), ("created_at", -1)],
                 name="generation_records_novel_active_created",
             ),
+            # 模块3：按统一行为类型检索候选记录（前端列表主查询）
+            pymongo.IndexModel(
+                [("novel_id", 1), ("action_type", 1), ("created_at", -1)],
+                name="generation_records_novel_action_created",
+            ),
+            # 按记录类型检索
+            pymongo.IndexModel(
+                [("novel_id", 1), ("record_type", 1), ("created_at", -1)],
+                name="generation_records_novel_record_type_created",
+            ),
+            # 按章节作用域 + 行为类型检索
+            pymongo.IndexModel(
+                [
+                    ("novel_id", 1),
+                    ("scope.chapter_id", 1),
+                    ("action_type", 1),
+                    ("created_at", -1),
+                ],
+                name="generation_records_scope_chapter_action_created",
+            ),
+            # 按卡片作用域检索
+            pymongo.IndexModel(
+                [("novel_id", 1), ("scope.card_id", 1), ("created_at", -1)],
+                name="generation_records_scope_card_created",
+            ),
+            # 按角色作用域检索
+            pymongo.IndexModel(
+                [("novel_id", 1), ("scope.character_id", 1), ("created_at", -1)],
+                name="generation_records_scope_character_created",
+            ),
+            # 最新标记检索
+            pymongo.IndexModel(
+                [("novel_id", 1), ("action_type", 1), ("is_latest", 1)],
+                name="generation_records_novel_action_latest",
+            ),
         ]
         # 索引构建失败不能阻断后端启动：缺失索引只影响性能与约束强度，日志里能看到原因
         await _create_indexes_leniently(collection, indexes, "generation_records")
@@ -1814,6 +1852,37 @@ async def init_story_event_indexes() -> None:
             pymongo.IndexModel(
                 [("novel_id", 1), ("is_deleted", 1), ("status", 1), ("created_at", -1)],
                 name="story_events_novel_status_created",
+            ),
+            # 模块3：按事件功能分类聚合
+            pymongo.IndexModel(
+                [("novel_id", 1), ("function", 1), ("created_at", -1)],
+                name="story_events_novel_function_created",
+            ),
+            # 按状态变化建议溯源
+            pymongo.IndexModel(
+                [("novel_id", 1), ("proposal_id", 1)],
+                name="story_events_novel_proposal",
+            ),
+            # 按冲突项溯源
+            pymongo.IndexModel(
+                [("novel_id", 1), ("conflict_id", 1)],
+                name="story_events_novel_conflict",
+            ),
+            # 按实体 + 事件类型取最新一条
+            pymongo.IndexModel(
+                [
+                    ("novel_id", 1),
+                    ("entity_type", 1),
+                    ("entity_id", 1),
+                    ("event_type", 1),
+                    ("is_latest", 1),
+                ],
+                name="story_events_entity_event_latest",
+            ),
+            # 按生成记录溯源
+            pymongo.IndexModel(
+                [("novel_id", 1), ("generation_id", 1)],
+                name="story_events_novel_generation",
             ),
         ]
         await _create_indexes_leniently(collection, indexes, "story_events")
@@ -1891,6 +1960,200 @@ async def init_setting_card_indexes() -> None:
         raise
 
 
+async def init_novel_blueprint_indexes() -> None:
+    """初始化创作蓝图集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["novel_blueprints"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("version", 1)],
+                unique=True,
+                name="novel_blueprints_novel_version_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("status", 1)],
+                name="novel_blueprints_novel_status",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "novel_blueprints")
+    except Exception as exc:
+        logger.error("初始化novel_blueprints索引失败：%s", exc)
+        raise
+
+
+async def init_power_system_indexes() -> None:
+    """初始化战力体系集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["power_systems"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("version", 1)],
+                unique=True,
+                name="power_systems_novel_version_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("status", 1)],
+                name="power_systems_novel_status",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "power_systems")
+    except Exception as exc:
+        logger.error("初始化power_systems索引失败：%s", exc)
+        raise
+
+
+async def init_text_revision_indexes() -> None:
+    """初始化正文修改建议集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["text_revisions"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("revision_id", 1)],
+                unique=True,
+                name="text_revisions_novel_revision_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("chapter_id", 1), ("created_at", 1)],
+                name="text_revisions_novel_chapter_created",
+            ),
+            pymongo.IndexModel(
+                [("chapter_id", 1), ("status", 1)],
+                name="text_revisions_chapter_status",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "text_revisions")
+    except Exception as exc:
+        logger.error("初始化text_revisions索引失败：%s", exc)
+        raise
+
+
+async def init_outline_indexes() -> None:
+    """初始化卷章大纲集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["novel_outlines"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("outline_id", 1)],
+                unique=True,
+                name="novel_outlines_novel_outline_unique",
+            ),
+            # 同一小说的版本号唯一，保证版本回滚与审计可追溯。
+            pymongo.IndexModel(
+                [("novel_id", 1), ("version", 1)],
+                unique=True,
+                name="novel_outlines_novel_version_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("status", 1)],
+                name="novel_outlines_novel_status",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("is_deleted", 1), ("created_at", -1)],
+                name="novel_outlines_novel_active_created",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "novel_outlines")
+    except Exception as exc:
+        logger.error("初始化novel_outlines索引失败：%s", exc)
+        raise
+
+
+async def init_worldbook_indexes() -> None:
+    """初始化世界书集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["worldbook_entries"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("entry_id", 1)],
+                unique=True,
+                name="worldbook_entries_novel_entry_unique",
+            ),
+            # 关键词匹配时的主查询：只取启用条目并按优先级倒序。
+            pymongo.IndexModel(
+                [("novel_id", 1), ("enabled", 1), ("priority", -1)],
+                name="worldbook_entries_novel_enabled_priority",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("category", 1)],
+                name="worldbook_entries_novel_category",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "worldbook_entries")
+    except Exception as exc:
+        logger.error("初始化worldbook_entries索引失败：%s", exc)
+        raise
+
+
+async def init_context_memory_indexes() -> None:
+    """初始化长期上下文记忆集合索引。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+    """
+    try:
+        collection = get_database()["context_memories"]
+        indexes = [
+            pymongo.IndexModel(
+                [("novel_id", 1), ("memory_id", 1)],
+                unique=True,
+                name="context_memories_novel_memory_unique",
+            ),
+            # 每个粒度在小说内只保留一条活动记忆；软删除记录不占用该约束。
+            pymongo.IndexModel(
+                [("novel_id", 1), ("scope", 1), ("scope_id", 1)],
+                unique=True,
+                partialFilterExpression={"is_deleted": False},
+                name="context_memories_active_scope_unique",
+            ),
+            pymongo.IndexModel(
+                [("novel_id", 1), ("updated_at", -1)],
+                name="context_memories_novel_updated",
+            ),
+        ]
+        await _create_indexes_leniently(collection, indexes, "context_memories")
+    except Exception as exc:
+        logger.error("初始化context_memories索引失败：%s", exc)
+        raise
+
+
 async def init_all_indexes():
     """初始化所有数据库索引。"""
     await init_novel_indexes()
@@ -1905,3 +2168,9 @@ async def init_all_indexes():
     await init_setting_card_indexes()
     await init_generation_record_indexes()
     await init_story_event_indexes()
+    await init_novel_blueprint_indexes()
+    await init_power_system_indexes()
+    await init_text_revision_indexes()
+    await init_outline_indexes()
+    await init_worldbook_indexes()
+    await init_context_memory_indexes()

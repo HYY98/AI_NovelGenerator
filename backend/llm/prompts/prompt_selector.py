@@ -102,6 +102,14 @@ EXTENDED_PROMPT_NAMES: tuple[str, ...] = (
     "chapter_compress",
     "consistency_review",
     "propose_state_changes",
+    # 模块2 新增：蓝图、战力体系、卡片改写、正文分析与正文修正
+    "rewrite_setting_card",
+    "prepare_blueprint",
+    "complete_blueprint",
+    "generate_power_system",
+    "generate_outline",
+    "analyze_chapter_settings",
+    "generate_text_revision",
 )
 
 EXTENDED_PROMPT_SECTIONS: dict[str, tuple[str, ...]] = {
@@ -159,6 +167,59 @@ EXTENDED_PROMPT_TEMPLATE_FIELDS: dict[str, set[str]] = {
     "chapter_compress_prompt_base": {"context_text", "instruction", "selection_text"},
     "consistency_review_prompt_base": {"context_text", "content"},
     "propose_state_changes_prompt_base": {"context_text", "content"},
+    "rewrite_setting_card_prompt_base": {
+        "card_type_label",
+        "card_type",
+        "card_json",
+        "target_fields",
+        "locked_fields",
+        "instruction",
+        "context_text",
+    },
+    "prepare_blueprint_prompt_base": {
+        "novel_title",
+        "generation_mode",
+        "plot_summary",
+        "worldview",
+        "power_system_json",
+        "selected_entities_json",
+        "user_prompt",
+    },
+    "complete_blueprint_prompt_base": {
+        "blueprint_json",
+        "missing_fields",
+        "context_text",
+        "user_prompt",
+    },
+    "generate_power_system_prompt_base": {
+        "novel_title",
+        "genre",
+        "worldview",
+        "existing_power_system_json",
+        "user_prompt",
+    },
+    "generate_outline_prompt_base": {
+        "novel_title",
+        "blueprint_json",
+        "target_chapter_count",
+        "target_word_count",
+        "available_entities_json",
+        "user_prompt",
+    },
+    "analyze_chapter_settings_prompt_base": {
+        "context_text",
+        "content",
+        "existing_cards_json",
+    },
+    "generate_text_revision_prompt_base": {
+        "context_text",
+        "content",
+        "revision_type",
+        "target_range",
+        "target_text",
+        "card_changes_json",
+        "instruction",
+    },
 }
 
 PROMPT_TEMPLATE_FIELDS: dict[str, set[str]] = {

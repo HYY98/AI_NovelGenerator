@@ -53,6 +53,10 @@ CARD_TYPES: Dict[str, Dict[str, Any]] = {
             "durability": "耐久/损毁状态",
             "secret": "重要秘密或揭示阶段",
             "notes": "备注",
+            # 模块3.5：物品卡战力关联字段
+            "required_power_level": "使用所需境界",
+            "power_bonus": "战力增幅",
+            "power_cost": "战力代价",
         },
     },
     "rule": {
@@ -265,6 +269,63 @@ class SettingCardRepository(BaseRepository):
                 f"卡片已被其他页面修改（服务器版本 {latest.get('version')}，当前基于版本 {base_version}），请刷新后重试"
             )
         return await self.get_card_by_oid(novel_id, card_id, session=session)
+
+    async def update_card_by_business_id(
+        self,
+        novel_id,
+        card_id: str,
+        data: Dict[str, Any],
+        expected_version: Optional[int] = None,
+        session=None,
+    ) -> Dict[str, Any]:
+        """按业务 card_id 更新卡片，语义与 update_card 一致。
+
+        Args:
+            novel_id: 小说 ObjectId 或字符串。
+            card_id: 卡片业务 ID（loc_/itm_/rul_）。
+            data: 待更新字段。
+            expected_version: 客户端基于的卡片版本；为空时以当前读到的版本为基准。
+            session: 可选 MongoDB 会话。
+
+        Returns:
+            更新后的卡片文档。
+
+        Raises:
+            NotFoundError: 卡片不存在。
+            DuplicateKeyError: 版本冲突。
+        """
+        existing = await self.get_card_by_business_id(novel_id, card_id, session=session)
+        return await self.update_card(
+            novel_id,
+            existing["_id"],
+            data,
+            expected_version=expected_version,
+            session=session,
+        )
+
+    async def hard_delete_card_by_business_id(
+        self,
+        novel_id,
+        card_id: str,
+        session=None,
+    ) -> bool:
+        """按业务 card_id 物理删除卡片。
+
+        Args:
+            novel_id: 小说 ObjectId 或字符串。
+            card_id: 卡片业务 ID（loc_/itm_/rul_）。
+            session: 可选 MongoDB 会话。
+
+        Returns:
+            实际删除成功时返回 True。
+
+        Raises:
+            NotFoundError: 卡片不存在。
+        """
+        existing = await self.get_card_by_business_id(
+            novel_id, card_id, include_deleted=True, session=session
+        )
+        return await self.hard_delete_card(novel_id, existing["_id"], session=session)
 
     async def soft_delete_card(self, novel_id, card_id, session=None) -> bool:
         await self.get_card_by_oid(novel_id, card_id, session=session)

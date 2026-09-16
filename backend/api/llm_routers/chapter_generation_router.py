@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from backend.db.errors import DuplicateKeyError, InvalidIdError, NotFoundError
 from backend.services.llm.chapter_generation_service import chapter_generation_service
+from backend.services.llm.text_revision_service import text_revision_service
 from backend.services.novel.chapter_finalize_service import finalize_chapter_service
 
 router = APIRouter(prefix="/api/llm", tags=["chapter-ai"])
@@ -160,6 +161,21 @@ class ChapterFinalizeRequest(BaseModel):
     ignored_issues: List[str] = Field(default_factory=list, max_length=200)
     blocking_issues: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
     force: bool = False
+    # 增量新增：提交时回传审校依据，服务端据此重新校验（不信任客户端 blocking_issues）
+    review_generation_id: str = Field(default="", max_length=80)
+    hard_rule_signature: str = Field(default="", max_length=80)
+    blueprint_version: Optional[int] = Field(default=None, ge=1)
+
+
+class ChapterSettingRevisionRequest(ChapterAIRequestBase):
+    """正文修改建议生成请求（规格 4.11）。"""
+
+    card_ids: List[str] = Field(default_factory=list, max_length=60)
+    revision_type: str = Field(default="supplement")
+    instruction: str = Field(default="", max_length=4000)
+    target_range: Dict[str, Any] = Field(default_factory=dict)
+    target_text: str = Field(default="", max_length=20000)
+    card_changes: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 DISPATCH = {
@@ -300,10 +316,45 @@ async def propose_chapter_state_changes(chapter_id: str, request: ChapterContent
         raise _http_exception(exc) from exc
 
 
+@router.post("/chapters/{chapter_id}/analyze-setting-cards")
+async def analyze_chapter_setting_cards(chapter_id: str, request: ChapterContentRequest):
+    """分析章节正文，产出新卡片、补充、冲突与事实变化候选。
+
+    全部结果都是候选，只写入生成记录，不直接修改正式卡片或正文。
+    """
+    try:
+        return await chapter_generation_service.analyze_setting_cards(
+            request.model_copy(update={"chapter_id": chapter_id})
+        )
+    except Exception as exc:
+        raise _http_exception(exc) from exc
+
+
 @router.post("/chapters/{chapter_id}/stream")
 async def stream_chapter_ai(chapter_id: str, request: ChapterStreamRequest):
     """统一流式生成入口，通过 kind 选择生成类型。"""
     return _sse_response(_run_with_progress(request.kind, request, chapter_id))
+
+
+@router.post("/chapters/{chapter_id}/setting-revision")
+async def generate_chapter_setting_revision(
+    chapter_id: str, request: ChapterSettingRevisionRequest
+):
+    """生成正文修改建议候选（补充/事实修正/术语统一），不直接写回正文。
+
+    Args:
+        chapter_id: 章节 ObjectId 字符串。
+        request: 小说、目标卡片、修改类型与范围。
+
+    Returns:
+        只含候选建议的响应体，用户确认后才写回章节。
+    """
+    try:
+        return await text_revision_service.generate(
+            request.model_copy(update={"chapter_id": chapter_id})
+        )
+    except Exception as exc:
+        raise _http_exception(exc) from exc
 
 
 @router.post("/chapters/{chapter_id}/finalize")

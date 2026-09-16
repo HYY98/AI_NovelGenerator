@@ -29,6 +29,10 @@ from backend.api.llm_routers.chapter_generation_router import router as chapter_
 from backend.api.llm_routers.setting_card_generation_router import (
     router as setting_card_generation_router,
 )
+from backend.api.llm_routers.novel_blueprint_router import router as novel_blueprint_router
+from backend.api.default_routers.setting_card_accept_router import (
+    router as setting_card_accept_router,
+)
 from backend.llm.prompts.prompt_selector import check_extended_prompts, load_prompt_config
 from backend.runtime import (
     apply_runtime_flags_from_argv,
@@ -159,6 +163,8 @@ app.include_router(create_novel_router)
 app.include_router(character_generation_router)
 app.include_router(chapter_generation_router)
 app.include_router(setting_card_generation_router)
+app.include_router(novel_blueprint_router)
+app.include_router(setting_card_accept_router)
 app.include_router(upload_router)
 
 if __name__ == "__main__":

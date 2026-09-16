@@ -8,6 +8,11 @@ import NovelInfoWorkspace from "./novel-info/NovelInfoWorkspace";
 import FactionCardsWorkspace from "./factions/FactionCardsWorkspace";
 import CharacterCardsWorkspace from "./characters/CharacterCardsWorkspace";
 import { CardWorkspace, ChapterEditorWorkspace } from "./StoryContinuityWorkspace";
+import {
+  CreationBlueprintWorkspace,
+  PowerSystemWorkspace,
+} from "@/components/novel-generation/BlueprintWorkspace";
+import { SettingSyncWorkspace } from "@/components/writing/ai/ChapterSettingSyncPanel";
 
 interface WritingContentProps {
   mode: "create" | "edit";
@@ -26,6 +31,8 @@ interface WritingContentProps {
  */
 export default function WritingContent({ mode, novelId }: WritingContentProps) {
   const [activeItem, setActiveItem] = useState<WritingSidebarItem>("novel-info");
+  /** 从正文同步中心跳转章节编辑器时使用的目标章节。 */
+  const [pendingChapterId, setPendingChapterId] = useState<string | null>(null);
 
   const renderMainArea = () => {
     if (activeItem === "novel-info") {
@@ -40,10 +47,32 @@ export default function WritingContent({ mode, novelId }: WritingContentProps) {
     if (activeItem === "relationship-map") {
       return <CharacterCardsWorkspace mode={mode} novelId={novelId} initialView="relations" />;
     }
-    if (activeItem === "chapter-editor") return <ChapterEditorWorkspace novelId={novelId} />;
+    if (activeItem === "chapter-editor")
+      return <ChapterEditorWorkspace novelId={novelId} initialChapterId={pendingChapterId} />;
     if (activeItem === "location-cards") return <CardWorkspace type="location" novelId={novelId} />;
     if (activeItem === "item-cards") return <CardWorkspace type="item" novelId={novelId} />;
     if (activeItem === "rule-cards") return <CardWorkspace type="rule" novelId={novelId} />;
+    // 增量新增：创作设定中心、战力体系与正文同步中心
+    if (activeItem === "creation-blueprint" || activeItem === "power-system") {
+      if (!novelId) return <WritingPlaceholder moduleKey={activeItem} />;
+      return activeItem === "creation-blueprint" ? (
+        <CreationBlueprintWorkspace novelId={novelId} />
+      ) : (
+        <PowerSystemWorkspace novelId={novelId} />
+      );
+    }
+    if (activeItem === "setting-sync") {
+      if (!novelId) return <WritingPlaceholder moduleKey={activeItem} />;
+      return (
+        <SettingSyncWorkspace
+          novelId={novelId}
+          onOpenChapter={(chapterId) => {
+            setPendingChapterId(chapterId);
+            setActiveItem("chapter-editor");
+          }}
+        />
+      );
+    }
     return <WritingPlaceholder moduleKey={activeItem} />;
   };
 

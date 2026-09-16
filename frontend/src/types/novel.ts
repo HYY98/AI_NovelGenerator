@@ -1,6 +1,8 @@
 import type { NovelRewriteFieldKey } from "@/lib/novelFields";
+import type { BlueprintStatus, GenerationMode } from "@/types/novelBlueprint";
 
 export type { NovelRewriteFieldKey } from "@/lib/novelFields";
+export type { BlueprintStatus, GenerationMode };
 
 export interface NovelSummary {
   _id: string;
@@ -32,6 +34,16 @@ export interface NovelDetail extends NovelSummary {
   core_idea?: string;
   number_of_chapters?: number;
   words_per_chapter?: number;
+  /** 增量新增：小说采用的生成模式，缺失时按 quick 处理。 */
+  generation_mode?: GenerationMode;
+  /** 增量新增：当前创作蓝图状态。 */
+  blueprint_status?: BlueprintStatus;
+  /** 增量新增：当前确认或草稿蓝图版本。 */
+  blueprint_version?: number;
+  /** 增量新增：战力体系业务 ID；战力体系嵌套在蓝图中时为空。 */
+  power_system_id?: string | null;
+  /** 增量新增：最近一次正文设定分析对应的章节版本。 */
+  last_analyzed_chapter_version?: number | null;
 }
 
 export interface CreateNovelRequest {
@@ -263,11 +275,28 @@ export interface BulkCreateCoreFactionsResponse {
   faction_relations: FactionRelation[];
 }
 
+/** 增量新增：AI 建书返回中的分阶段生成状态，用于前端展示蓝图/大纲/章节进度。 */
+export interface AICreateGenerationStatus {
+  mode?: GenerationMode;
+  blueprint_id?: string | null;
+  blueprint_version?: number | null;
+  outline_status?: string | null;
+  chapter_generation_status?: string | null;
+}
+
 export interface AICreateRequest {
   user_idea: string;
   number_of_chapters?: number;
   words_per_chapter?: number;
   cached_steps?: AICreateCachedSteps;
+  /** 增量新增：quick 保留原四步建书行为，guided 复用已确认蓝图。 */
+  generation_mode?: GenerationMode;
+  /** 增量新增：guided 模式中蓝图所属小说的 ObjectId。 */
+  novel_id?: string | null;
+  /** 增量新增：guided 模式使用的已确认蓝图业务 ID。 */
+  blueprint_id?: string | null;
+  /** 增量新增：guided 模式使用的蓝图版本。 */
+  blueprint_version?: number | null;
   // 可选生成参数
   temperature?: number | null;
   top_p?: number | null;
@@ -310,6 +339,14 @@ export interface AICreateResponse {
   };
 }
 
+/** 增量新增：AI 建书 SSE 完成事件中的扩展字段。 */
+export interface AICreateDoneExtra extends AICreateGenerationStatus {
+  success?: boolean;
+  failed_step?: AICreateStepKey;
+  partial_result?: unknown;
+  result?: AICreateResponse;
+}
+
 export type AICreateStepKey = "expand_idea" | "extract_idea" | "core_seed" | "novel_meta";
 
 export type AICreateCachedSteps = Partial<{
@@ -325,7 +362,7 @@ export interface WritingDraft extends CreateNovelRequest {
   _rewriteState?: WritingDraftRewriteState;
 }
 
-/** Writing 侧栏导航项 */
+/** Writing 侧栏导航项（增量新增创作设定中心、战力体系与正文同步中心入口） */
 export type WritingSidebarItem =
   | "novel-info"
   | "chapter-editor"
@@ -334,4 +371,7 @@ export type WritingSidebarItem =
   | "faction-cards"
   | "item-cards"
   | "rule-cards"
-  | "relationship-map";
+  | "relationship-map"
+  | "creation-blueprint"
+  | "power-system"
+  | "setting-sync";

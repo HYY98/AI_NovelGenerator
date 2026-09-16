@@ -29,6 +29,7 @@ from backend.llm.schemas.chapter_pydantic import (
     ConsistencyReviewSchema,
     StateChangeProposalResultSchema,
 )
+from backend.llm.schemas.setting_card_pydantic import ChapterSettingAnalysisSchema
 from backend.services.llm.chapter_context_service import ChapterContext, chapter_context_service
 from backend.services.llm.generation_support import (
     provider_model,
@@ -56,6 +57,8 @@ KIND_TO_STEP: Dict[str, str] = {
     "chapter_compress": "chapter_compress",
     "consistency_review": "consistency_review",
     "state_change_proposal": "propose_state_changes",
+    # 模块2 新增：章节正文设定分析（新卡片、补充、冲突、事实变化）
+    "analyze_chapter_settings": "analyze_chapter_settings",
 }
 
 # 生成类型 -> 结构化 Schema
@@ -68,6 +71,7 @@ KIND_TO_SCHEMA = {
     "chapter_compress": ChapterCompressSchema,
     "consistency_review": ConsistencyReviewSchema,
     "state_change_proposal": StateChangeProposalResultSchema,
+    "analyze_chapter_settings": ChapterSettingAnalysisSchema,
 }
 
 # 正文类生成的默认目标字数
@@ -183,6 +187,7 @@ class ChapterGenerationService:
         provider: str,
         warnings: List[str],
         conflicts: List[str],
+        chapter_version: int | None = None,
     ) -> Dict[str, Any]:
         """写入生成记录并返回候选响应体。"""
         return await save_record(
@@ -195,6 +200,7 @@ class ChapterGenerationService:
             provider=provider,
             warnings=warnings,
             conflicts=conflicts,
+            chapter_version=chapter_version,
         )
 
     # ------------------------------------------------------------------
@@ -474,6 +480,8 @@ class ChapterGenerationService:
             provider=provider,
             warnings=warnings,
             conflicts=[],
+            # 增量新增：审校记录带上章节版本，定稿提交时据此复核审校是否过期
+            chapter_version=int(chapter.get("version") or 1),
         )
 
     async def propose_state_changes(self, request: Any) -> Dict[str, Any]:
@@ -503,6 +511,55 @@ class ChapterGenerationService:
             provider=provider,
             warnings=warnings,
             conflicts=[],
+            chapter_version=int(chapter.get("version") or 1),
+        )
+
+    # ------------------------------------------------------------------
+    # 章节正文设定分析（模块2 新增）
+    # ------------------------------------------------------------------
+    async def analyze_setting_cards(self, request: Any) -> Dict[str, Any]:
+        """分析章节正文，产出新卡片、补充、冲突与事实变化候选。
+
+        全部结果都是候选：只写入生成记录，不直接修改正式卡片或正文。
+        事实变化候选需要由上层经 story_events 待确认后才会生效。
+
+        Args:
+            request: 请求模型，需包含 novel_id、chapter_id 等字段。
+
+        Returns:
+            包含 new_cards / supplements / conflicts / state_changes 的候选响应体。
+
+        Raises:
+            InvalidIdError: 章节正文为空。
+        """
+        _novel, _chapter, context = await self.prepare_context(request)
+        kind = "analyze_chapter_settings"
+        content = getattr(request, "content", "") or str(_chapter.get("content") or "")
+        if not content.strip():
+            raise InvalidIdError("章节正文为空，无法做设定分析")
+
+        prompt = self._build_prompt(
+            kind,
+            context,
+            content=content,
+            existing_cards_json=_dump(sorted(context.known_card_ids)),
+        )
+        data, provider, warnings = await self._run(
+            kind, request, prompt, ChapterSettingAnalysisSchema, context=context
+        )
+        return await self._save_record(
+            request.novel_id,
+            kind,
+            chapter_id=context.chapter_id,
+            request_id=getattr(request, "request_id", "") or "",
+            snapshot=context.snapshot,
+            data=data,
+            provider=provider,
+            warnings=warnings,
+            conflicts=[
+                str(item.get("message") or "") for item in (data.get("conflicts") or [])
+            ],
+            chapter_version=int(_chapter.get("version") or 1),
         )
 
     # ------------------------------------------------------------------
@@ -552,7 +609,120 @@ class ChapterGenerationService:
             }
         if kind == "consistency_review":
             return self._normalize_review(result, warnings)
+        if kind == "analyze_chapter_settings" and context is not None:
+            return self._normalize_analysis(result, context, warnings)
         return result.model_dump()
+
+    def _normalize_analysis(
+        self,
+        result: Any,
+        context: ChapterContext,
+        warnings: List[str],
+    ) -> Dict[str, Any]:
+        """归一化章节正文设定分析结果，剔除无依据或引用未知实体的候选。
+
+        Args:
+            result: 已通过 Schema 校验的分析结果。
+            context: 章节上下文，提供已知卡片业务 ID。
+            warnings: 告警收集列表，会被就地追加。
+
+        Returns:
+            归一化后的分析数据字典。
+        """
+        known_card_ids = set(context.known_card_ids or {})
+        new_cards: List[Dict[str, Any]] = []
+        for item in result.new_cards:
+            name = str(item.name or "").strip()
+            if not name:
+                warnings.append("忽略了一个没有名称的新卡片候选")
+                continue
+            card_type = str(item.type or "").strip().lower()
+            if card_type not in ("location", "item", "rule"):
+                warnings.append(f"新卡片「{name}」的类型 {card_type or '空'} 非法，已忽略")
+                continue
+            duplicate_of = str(item.duplicate_of or "").strip()
+            if duplicate_of and duplicate_of not in known_card_ids:
+                warnings.append(
+                    f"新卡片「{name}」指向了未知卡片 {duplicate_of}，已按新建处理"
+                )
+                duplicate_of = ""
+            new_cards.append(
+                {
+                    "type": card_type,
+                    "name": name,
+                    "aliases": [str(a) for a in item.aliases if str(a).strip()],
+                    "fields": dict(item.fields or {}),
+                    "evidence": item.evidence.model_dump(),
+                    "duplicate_of": duplicate_of,
+                    "suggested_action": "merge" if duplicate_of else "create",
+                    "confidence": float(item.confidence or 0.0),
+                    "reason": str(item.reason or ""),
+                }
+            )
+
+        supplements: List[Dict[str, Any]] = []
+        for item in result.supplements:
+            card_id = str(item.card_id or "").strip()
+            if card_id not in known_card_ids:
+                warnings.append(f"补充候选引用了未知卡片 {card_id or '空'}，已忽略")
+                continue
+            supplements.append(
+                {
+                    "card_id": card_id,
+                    "card_type": str(item.card_type or ""),
+                    "card_name": str(item.card_name or ""),
+                    "added_fields": dict(item.added_fields or {}),
+                    "evidence": item.evidence.model_dump(),
+                    "confidence": float(item.confidence or 0.0),
+                    "reason": str(item.reason or ""),
+                }
+            )
+
+        state_changes: List[Dict[str, Any]] = []
+        for item in result.state_changes:
+            entity_id = str(item.entity_id or "").strip()
+            if entity_id not in known_card_ids:
+                warnings.append(f"事实变化候选引用了未知实体 {entity_id or '空'}，已忽略")
+                continue
+            evidence = item.evidence.model_dump()
+            state_changes.append(
+                {
+                    "entity_type": str(item.entity_type or "location"),
+                    "entity_id": entity_id,
+                    "entity_name": str(item.entity_name or ""),
+                    "change_type": str(item.change_type or "state_change"),
+                    "chapter_id": context.chapter_id,
+                    "before": dict(item.before or {}),
+                    "after": dict(item.after or {}),
+                    # 展开证据便于前端直接高亮，同时保留结构化 evidence 供后端回写事件
+                    "evidence": evidence,
+                    "evidence_text": str(evidence.get("text") or ""),
+                    "evidence_start": evidence.get("start"),
+                    "evidence_end": evidence.get("end"),
+                    "confidence": float(item.confidence or 0.0),
+                    "note": str(item.note or ""),
+                }
+            )
+
+        conflicts = [
+            {
+                "severity": str(item.severity or "warning"),
+                "message": str(item.message or ""),
+                "suggestion": str(item.suggestion or ""),
+                "related_card_ids": [
+                    cid for cid in (item.related_card_ids or []) if cid in known_card_ids
+                ],
+            }
+            for item in result.conflicts
+            if str(item.message or "").strip()
+        ]
+        return {
+            "new_cards": new_cards,
+            "supplements": supplements,
+            "conflicts": conflicts,
+            "state_changes": state_changes,
+            "summary": str(result.summary or ""),
+        }
 
     @staticmethod
     def _default_words(novel: Dict[str, Any]) -> int:

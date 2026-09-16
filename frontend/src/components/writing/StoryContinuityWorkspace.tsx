@@ -30,6 +30,10 @@ interface Card {
   tags: string[];
   version: number;
   is_deleted?: boolean;
+  /** 增量新增：规则卡是否为硬规则（后端按布尔语义落库）。 */
+  is_hard_rule?: boolean;
+  /** 增量新增：卡片确认状态，用于区分已确认设定与 AI 候选。 */
+  status?: string | null;
 }
 
 // 字段结构与后端 setting_card_repository.CARD_TYPES 保持一致（权威在后端）
@@ -144,8 +148,9 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
       ] as const) {
         if (key in source) body[key] = source[key];
       }
+      // 这是用户在卡片编辑器里的显式修改（含名称/当前状态/硬规则），带确认参数
       const saved = await apiPut<Card>(
-        `/api/setting-cards/${novelId}/${cardOid}?expected_version=${baseVersion}`,
+        `/api/setting-cards/${novelId}/${cardOid}?expected_version=${baseVersion}&confirm_locked_fields=true`,
         body
       );
       setCards((prev) =>
@@ -318,16 +323,19 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
     if (!current || !novelId) return;
     setBusy(true);
     try {
-      const saved = await apiPut<Card>(`/api/setting-cards/${novelId}/${current._id}`, {
-        name: current.name,
-        aliases: current.aliases,
-        fields: current.fields,
-        enabled: current.enabled,
-        importance: current.importance,
-        first_appearance_chapter: current.first_appearance_chapter,
-        current_state: current.current_state,
-        tags: current.tags,
-      });
+      const saved = await apiPut<Card>(
+        `/api/setting-cards/${novelId}/${current._id}?confirm_locked_fields=true`,
+        {
+          name: current.name,
+          aliases: current.aliases,
+          fields: current.fields,
+          enabled: current.enabled,
+          importance: current.importance,
+          first_appearance_chapter: current.first_appearance_chapter,
+          current_state: current.current_state,
+          tags: current.tags,
+        }
+      );
       setCards((prev) => prev.map((c) => (c._id === saved._id ? saved : c)));
       queueRef.current.setBaseVersion(saved.version);
       setConflict(null);
@@ -518,6 +526,17 @@ export function CardWorkspace({ type, novelId }: { type: CardType; novelId?: str
                   <span className="truncate">
                     {card.is_deleted && <span className="mr-1 text-red-500">[已删]</span>}
                     {card.name}
+                    {/* 增量新增：硬规则 / 已确认标记，帮助区分强制约束与普通软设定 */}
+                    {card.is_hard_rule && (
+                      <span className="ml-1 rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] text-red-600">
+                        硬规则
+                      </span>
+                    )}
+                    {card.status === "confirmed" && (
+                      <span className="ml-1 rounded-full bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
+                        已确认
+                      </span>
+                    )}
                   </span>
                   <span className="ml-auto shrink-0 text-xs text-muted">
                     {showDeleted ? "" : card.enabled ? "启用" : "停用"}
@@ -741,7 +760,14 @@ interface LinkOption {
   name: string;
 }
 
-export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
+export function ChapterEditorWorkspace({
+  novelId,
+  initialChapterId,
+}: {
+  novelId?: string;
+  /** 增量新增：从外部（如正文同步中心）直接打开指定章节。 */
+  initialChapterId?: string | null;
+}) {
   const [list, setList] = useState<Chapter[]>([]);
   const [current, setCurrent] = useState<Chapter | null>(null);
   const [loading, setLoading] = useState(true);
@@ -886,6 +912,13 @@ export function ChapterEditorWorkspace({ novelId }: { novelId?: string }) {
       setError(errMsg(e, "章节加载失败"));
     }
   };
+
+  // 增量新增：外部指定章节时自动打开，已打开同一章则跳过
+  useEffect(() => {
+    if (!initialChapterId) return;
+    if (currentRef.current?._id === initialChapterId) return;
+    void openChapter(initialChapterId);
+  }, [initialChapterId]);
 
   const createChapter = async () => {
     if (!novelId) return;

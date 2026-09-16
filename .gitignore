@@ -1,12 +1,91 @@
+# Python
 **/__pycache__/
-/static/
-/Developer_Documentation/
-/logs/
-.venv/
-.vscode/
-.pytest_cache/
 *.py[cod]
 *$py.class
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Environment variables (NEVER commit)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+*.local
 config.yaml
-publish-public.ps1
+config.yml
+config.json
+
+# Static files (generated)
+/static/
+
+# Documentation (not for public release)
+/Developer_Documentation/
 PUBLIC_RELEASE.md
+publish-public.ps1
+
+# Logs
+/logs/
+logs/
+*.log
+npm-debug.log*
+
+# IDE / Editor
+.vscode/
+.idea/
+.codebuddy/
+*.swp
+*.swo
+*~
+
+# OS system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Node.js (if any frontend)
+node_modules/
+.next/
+.nuxt/
+out/
+dist/
+*.tsbuildinfo
+.eslintcache
+.cache/
+.parcel-cache/
+
+# Database files (NEVER commit)
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+data/
+*.dump
+
+# Upload / user data
+uploads/
+upload/
+static/uploads/
+
+# Code coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.old
+backup/
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

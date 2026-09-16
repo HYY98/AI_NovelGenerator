@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -25,6 +27,29 @@ PROBE_TOKEN = "probe-token-73"
 FUNCTION_TOOL_NAME = "report_provider_probe"
 FUNCTION_EXPECTED_TEXT = f"PROVIDER_FUNCTION_OK {PROBE_TOKEN}"
 SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{12,})")
+
+logger = logging.getLogger(__name__)
+
+# 免费/共享通道常见瞬时故障：单项探测失败后自动重试的次数与间隔
+PROBE_ATTEMPTS = 2
+PROBE_RETRY_DELAY_SECONDS = 1.5
+# 能力探测的单项超时上限，避免通道挂起时按 Provider 的长超时（如 180 秒）长时间等待
+PROBE_TIMEOUT_SECONDS = 60
+# 判定为「可重试的瞬时错误」的关键词：网关抖动、限流、超时、上游不可用
+TRANSIENT_ERROR_KEYWORDS = (
+    "upstream_error",
+    "connection",
+    "timeout",
+    "timed out",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "overloaded",
+    "temporarily",
+)
 
 
 class ProviderTestRequest(BaseModel):
@@ -76,6 +101,9 @@ class ProviderJsonProbeSchema(BaseModel):
 def _default_client_factory(config: LLMProviderConfig, alias: str) -> BaseLLMClient:
     """创建用于接口测试的临时 LLM 客户端。
 
+    测试场景下把单项超时压到 PROBE_TIMEOUT_SECONDS 以内，
+    避免不稳定通道（尤其是免费通道）把界面卡在 Provider 配置的长超时上。
+
     Args:
         config: 当前表单提交的 Provider 配置。
         alias: 当前 Provider 别名。
@@ -83,7 +111,15 @@ def _default_client_factory(config: LLMProviderConfig, alias: str) -> BaseLLMCli
     Returns:
         对应类型的 LLM 客户端实例。
     """
-    return create_llm_client_from_config(config, provider_name=alias, require_enabled=False)
+    probe_timeout = min(
+        int(config.timeout_seconds or PROBE_TIMEOUT_SECONDS), PROBE_TIMEOUT_SECONDS
+    )
+    return create_llm_client_from_config(
+        config,
+        provider_name=alias,
+        timeout_seconds=probe_timeout,
+        require_enabled=False,
+    )
 
 
 def _build_probe_request(prompt: str) -> LLMRequest:
@@ -208,6 +244,19 @@ def _result(
     )
 
 
+def _is_transient_probe_error(exc: BaseException) -> bool:
+    """判断测试失败是否属于可重试的瞬时错误（网关抖动、限流、超时、上游不可用）。
+
+    Args:
+        exc: 当前测试步骤捕获到的异常。
+
+    Returns:
+        命中瞬时错误特征时返回 True。
+    """
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(keyword in text for keyword in TRANSIENT_ERROR_KEYWORDS)
+
+
 async def _run_step(
     capability: ProviderTestCapability,
     label: str,
@@ -217,7 +266,7 @@ async def _run_step(
     *,
     success_message: str = "测试通过",
 ) -> ProviderCapabilityResult:
-    """执行单个 Provider 能力测试步骤。
+    """执行单个 Provider 能力测试步骤，瞬时故障会自动重试一次。
 
     Args:
         capability: 能力标识。
@@ -231,28 +280,51 @@ async def _run_step(
         单项测试结果。
     """
     start = time.perf_counter()
-    try:
-        await runner()
-    except Exception as exc:
-        log_provider_test_raw_response(
-            provider_alias,
-            capability,
-            _extract_response_debug_payload(exc, api_key),
-        )
-        return _result(
-            capability,
-            label,
-            "failed",
-            duration_ms=int((time.perf_counter() - start) * 1000),
-            message=_build_failure_message(exc, api_key),
-        )
+    last_exc: BaseException | None = None
+    for attempt in range(1, PROBE_ATTEMPTS + 1):
+        try:
+            await runner()
+        except Exception as exc:
+            last_exc = exc
+            # 免费/共享通道常见瞬时 5xx、upstream_error 与连接抖动：重试一次再判定失败
+            if attempt < PROBE_ATTEMPTS and _is_transient_probe_error(exc):
+                logger.info(
+                    "Provider %s 能力测试 %s 第 %s 次失败，%.1fs 后自动重试: %s",
+                    provider_alias,
+                    capability,
+                    attempt,
+                    PROBE_RETRY_DELAY_SECONDS,
+                    exc,
+                )
+                await asyncio.sleep(PROBE_RETRY_DELAY_SECONDS)
+                continue
+            log_provider_test_raw_response(
+                provider_alias,
+                capability,
+                _extract_response_debug_payload(exc, api_key),
+            )
+            return _result(
+                capability,
+                label,
+                "failed",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                message=_build_failure_message(exc, api_key),
+            )
+        else:
+            return _result(
+                capability,
+                label,
+                "passed",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                message=success_message,
+            )
 
     return _result(
         capability,
         label,
-        "passed",
+        "failed",
         duration_ms=int((time.perf_counter() - start) * 1000),
-        message=success_message,
+        message=_build_failure_message(last_exc or Exception("未知错误"), api_key),
     )
 
 
@@ -477,11 +549,21 @@ async def test_llm_provider_capabilities(
         supports_function_calling=results[3].status == "passed",
     )
     passed_count = sum(1 for item in results if item.status == "passed")
+    if passed_count == len(results):
+        summary = f"{passed_count}/{len(results)} 项测试通过，能力开关已生成建议值"
+    elif results[0].status == "passed":
+        # 连接可用但高级能力未通过：这些能力在业务里会自动降级，避免被误判成配置错误
+        summary = (
+            f"{passed_count}/{len(results)} 项测试通过；接口可用，"
+            "未通过的高级能力会自动降级，不影响基本生成"
+        )
+    else:
+        summary = "连接测试失败，已跳过能力探测"
     return ProviderTestResponse(
         alias=alias,
         provider_type=provider.type,
         model=provider.default_model,
-        summary=f"{passed_count}/{len(results)} 项测试通过，能力开关已生成建议值",
+        summary=summary,
         results=results,
         recommendations=recommendation,
     )

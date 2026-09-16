@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import json
 import re
@@ -12,11 +13,16 @@ import openai
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from backend.llm.base_client import BaseLLMClient
+from backend.llm.base_client import (
+    BaseLLMClient,
+    is_length_limit_error,
+    plan_truncation_retry,
+)
 from backend.llm.config import LLMProviderConfig
 from backend.llm.exceptions import (
     LLMAuthError,
     LLMError,
+    LLMOutputTruncatedError,
     LLMRateLimitError,
     LLMResponseError,
     LLMSchemaError,
@@ -24,6 +30,8 @@ from backend.llm.exceptions import (
 )
 from backend.llm.logger import log_llm_error, log_llm_request, log_llm_response
 from backend.llm.models import LLMFunctionCallProbe, LLMRequest, LLMResponse, TokenUsage
+
+logger = logging.getLogger(__name__)
 
 
 _API_VERSION_RE = re.compile(r"^v\d+(?:[a-z0-9._-]+)?$", re.IGNORECASE)
@@ -150,6 +158,14 @@ class OpenAICompatibleClient(BaseLLMClient):
             return LLMRateLimitError(str(exc), **kwargs)
         if isinstance(exc, openai.APITimeoutError):
             return LLMTimeoutError(str(exc), **kwargs)
+        if is_length_limit_error(exc):
+            # SDK 的结构化解析在输出被 max_tokens 截断时直接抛错，这里给出可执行建议
+            return LLMOutputTruncatedError(
+                "模型输出达到 max_tokens 上限被截断，结构化结果无法解析；"
+                "请调大 max_tokens（建议不低于 2048）或缩短单次输出要求。"
+                f"原始错误：{str(exc)[:200]}",
+                **kwargs,
+            )
         if isinstance(exc, openai.APIError):
             return LLMResponseError(str(exc), **kwargs)
         return LLMError(str(exc), **kwargs)
@@ -206,16 +222,40 @@ class OpenAICompatibleClient(BaseLLMClient):
         log_llm_request(request, self.provider_name)
         start = time.perf_counter()
 
-        try:
-            params = self._build_params(request)
-            resp = await self._client.beta.chat.completions.parse(
-                **params,
-                response_format=schema,
-            )
-        except Exception as exc:
-            mapped = self._map_error(exc, model)
-            log_llm_error(mapped, provider=self.provider_name, model=model)
-            raise mapped from exc
+        # 输出被长度上限截断时自动放大一次预算重试，避免把可自愈的调用直接报给用户
+        attempt_request = request
+        retried = False
+        while True:
+            try:
+                params = self._build_params(attempt_request)
+                resp = await self._client.beta.chat.completions.parse(
+                    **params,
+                    response_format=schema,
+                )
+                break
+            except Exception as exc:
+                retry_tokens = (
+                    plan_truncation_retry(
+                        attempt_request.max_tokens, self.config.max_tokens
+                    )
+                    if not retried and is_length_limit_error(exc)
+                    else None
+                )
+                if retry_tokens is None:
+                    mapped = self._map_error(exc, model)
+                    log_llm_error(mapped, provider=self.provider_name, model=model)
+                    raise mapped from exc
+                logger.warning(
+                    "结构化输出被长度上限截断，自动放大 max_tokens=%s 重试一次"
+                    "（provider=%s model=%s）",
+                    retry_tokens,
+                    self.provider_name,
+                    model,
+                )
+                retried = True
+                attempt_request = attempt_request.model_copy(
+                    update={"max_tokens": retry_tokens}
+                )
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         choice = resp.choices[0] if resp.choices else None

@@ -83,6 +83,26 @@ class CardConflictRequest(CardAIRequestBase):
     card_id: str = Field(min_length=1)
 
 
+class CardRewriteRequest(CardAIRequestBase):
+    """AI 改写卡片请求：只改写 target_fields 指定的字段。"""
+
+    card_id: str = Field(min_length=1)
+    target_fields: List[str] = Field(default_factory=list, max_length=60)
+    instruction: str = Field(default="", max_length=4000)
+    chapter_version: int | None = Field(default=None, ge=1)
+    # 默认保护 name / current_state，规则卡额外保护 is_hard_rule；
+    # 只有用户显式置为 true 时才允许 AI 改写这些字段
+    allow_locked_fields: bool = False
+
+
+class CardMergePreviewRequest(BaseModel):
+    """把抽取候选合并进已有卡片时的字段级差异预览请求。"""
+
+    novel_id: str = Field(min_length=1)
+    card_id: str = Field(min_length=1)
+    candidate: Dict[str, Any] = Field(default_factory=dict)
+
+
 @router.post("/generate")
 async def generate_setting_card(request: CardGenerateRequest):
     """生成卡片候选（不写入正式卡片）。"""
@@ -98,6 +118,26 @@ async def complete_setting_card(card_id: str, request: CardCompleteRequest):
     payload = request.model_copy(update={"card_id": card_id})
     try:
         return await setting_card_generation_service.complete_card(payload)
+    except Exception as exc:
+        raise _http_exception(exc) from exc
+
+
+@router.post("/{card_id}/rewrite")
+async def rewrite_setting_card(card_id: str, request: CardRewriteRequest):
+    """按指令改写指定卡片的字段，只返回字段级候选补丁。"""
+    payload = request.model_copy(update={"card_id": card_id})
+    try:
+        return await setting_card_generation_service.rewrite_card(payload)
+    except Exception as exc:
+        raise _http_exception(exc) from exc
+
+
+@router.post("/{card_id}/merge-preview")
+async def preview_card_merge(card_id: str, request: CardMergePreviewRequest):
+    """预览把抽取候选合并进已有卡片时的字段级差异。"""
+    payload = request.model_copy(update={"card_id": card_id})
+    try:
+        return await setting_card_generation_service.merge_preview(payload)
     except Exception as exc:
         raise _http_exception(exc) from exc
 

@@ -143,10 +143,11 @@ export function GenerationParamsCollapse({
           />
           <OptionalNumberParam
             label={t("maxTokens")}
+            description={t("maxTokensHint")}
             value={value.max_tokens}
             onToggle={(enabled) => updateParam("max_tokens", enabled ? 4096 : null)}
             onValueChange={(nextValue) => updateParam("max_tokens", nextValue)}
-            min={256}
+            min={512}
             max={maxTokensMaximum}
             step={256}
           />

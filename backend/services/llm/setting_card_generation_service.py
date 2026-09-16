@@ -25,6 +25,7 @@ from backend.llm.schemas.setting_card_pydantic import (
     CardConflictResultSchema,
     CardExtractResultSchema,
     CardGenerateResultSchema,
+    CardRewriteResultSchema,
 )
 from backend.services.llm.chapter_context_service import ChapterContext, chapter_context_service
 from backend.services.llm.generation_support import (
@@ -40,6 +41,12 @@ from backend.services.llm.workflow_service import (
 logger = logging.getLogger(__name__)
 
 WORKFLOW_NAME = "setting_card_ai"
+
+# 默认保护字段：AI 改写时不允许直接改，用户显式解锁后才可改
+DEFAULT_PROTECTED_FIELDS = ("name", "current_state")
+
+# 规则卡额外保护字段：is_hard_rule 既不能由 AI 单独置为 true，也不能默认进入可改列表
+RULE_PROTECTED_FIELDS = ("is_hard_rule",)
 
 # 卡片类型 -> 生成记录的 kind（技术指引 19.3）
 CARD_KIND = {
@@ -548,6 +555,227 @@ class SettingCardGenerationService:
             warnings=warnings,
             conflicts=[item["message"] for item in conflicts],
         )
+
+    # ------------------------------------------------------------------
+    # AI 改写卡片（模块2 新增）
+    # ------------------------------------------------------------------
+    async def rewrite_card(self, request: Any) -> Dict[str, Any]:
+        """按用户指令改写一张已有卡片的指定字段，只产出字段级候选补丁。
+
+        未指定的字段一律视为锁定字段；AI 返回的补丁中若出现锁定字段或未知字段，
+        会在服务端被丢弃并记录告警，避免污染正式卡片。
+
+        Args:
+            request: 请求模型，需包含 novel_id、card_id、instruction、
+                target_fields、chapter_id、request_id 等字段。
+
+        Returns:
+            包含 changed_fields / preserved_fields 的候选响应体。
+
+        Raises:
+            InvalidIdError: 缺少 card_id、卡片类型非法或没有可改写字段。
+            NotFoundError: 卡片不存在或不属于该小说。
+        """
+        novel_id = request.novel_id
+        card_id = str(getattr(request, "card_id", "") or "").strip()
+        if not card_id:
+            raise InvalidIdError("缺少 card_id")
+        card = await self.card_repo.get_card_by_business_id(novel_id, card_id)
+        card_type = self._validate_type(card.get("type", ""))
+
+        allowed_fields = set(CARD_TYPES[card_type]["fields"].keys())
+        target_fields = [
+            str(item).strip()
+            for item in (getattr(request, "target_fields", None) or [])
+            if str(item).strip()
+        ]
+        unknown = [item for item in target_fields if item not in allowed_fields]
+        if unknown:
+            raise InvalidIdError(
+                f"字段 {', '.join(unknown)} 不属于 {card_type} 卡的字段，无法改写"
+            )
+
+        # 默认保护 name / current_state，规则卡额外保护 is_hard_rule；
+        # 只有用户显式声明 allow_locked_fields 时才放开，AI 无法自行解锁
+        protected = set(DEFAULT_PROTECTED_FIELDS)
+        if card_type == "rule":
+            protected |= set(RULE_PROTECTED_FIELDS)
+        if not bool(getattr(request, "allow_locked_fields", False)):
+            blocked = [item for item in target_fields if item in protected]
+            if blocked:
+                raise InvalidIdError(
+                    f"字段 {', '.join(blocked)} 受保护，需显式允许后才能改写"
+                )
+        target_fields = [item for item in target_fields if item not in protected or bool(getattr(request, "allow_locked_fields", False))]
+        if not target_fields:
+            raise InvalidIdError("改写卡片至少需要指定一个目标字段")
+
+        kind = "rewrite_setting_card"
+        cached = await reuse_record(novel_id, kind, getattr(request, "request_id", "") or "")
+        if cached:
+            return cached
+
+        context = await self._build_context(
+            novel_id,
+            getattr(request, "chapter_id", "") or "",
+            getattr(request, "instruction", "") or "",
+        )
+        locked_fields = sorted(allowed_fields - set(target_fields))
+        prompts = get_prompt_section("rewrite_setting_card")
+        prompt = (
+            prompts["rewrite_setting_card_prompt_base"].format(
+                card_type_label=CARD_TYPES[card_type]["label"],
+                card_type=card_type,
+                card_json=self._card_json(card),
+                target_fields="、".join(target_fields),
+                locked_fields="、".join(locked_fields) or "（无）",
+                instruction=str(getattr(request, "instruction", "") or "").strip()
+                or "请按当前设定补全并优化这些字段",
+                context_text=context.text,
+            )
+            + "\n"
+            + prompts["rewrite_setting_card_prompt_without_schema_suffix"]
+        ).strip()
+
+        service, provider, use_json_schema, _stream = resolve_runtime(
+            request, WORKFLOW_NAME, "rewrite_setting_card"
+        )
+        result = await generate_structured_result(
+            service,
+            prompt,
+            CardRewriteResultSchema,
+            "rewrite_setting_card",
+            gen_kwargs=build_generation_kwargs(request),
+            use_json_schema=use_json_schema,
+        )
+
+        warnings: List[str] = []
+        current_fields = card.get("fields") or {}
+        changed_fields: List[Dict[str, Any]] = []
+        for item in result.changed_fields:
+            field = str(item.field or "").strip()
+            if field not in target_fields:
+                warnings.append(f"AI 改写了非目标字段 {field or '空'}，已忽略")
+                continue
+            new_value = str(item.new_value or "").strip()
+            if not new_value:
+                warnings.append(f"字段 {field} 的候选值为空，已忽略")
+                continue
+            changed_fields.append(
+                {
+                    "field": field,
+                    "old_value": str(current_fields.get(field) or ""),
+                    "new_value": new_value,
+                    "reason": str(item.reason or ""),
+                    "warnings": list(item.warnings or []),
+                }
+            )
+        if not changed_fields:
+            warnings.append("AI 未产出任何可应用的字段改写，请调整指令后重试")
+
+        data = {
+            "target_card_id": card_id,
+            "target_card_type": card_type,
+            "changed_fields": changed_fields,
+            "preserved_fields": [
+                str(item)
+                for item in (result.preserved_fields or [])
+                if str(item) in allowed_fields
+            ],
+            "notes": str(result.notes or ""),
+        }
+        return await save_record(
+            novel_id,
+            kind,
+            chapter_id=getattr(request, "chapter_id", "") or "",
+            card_id=card_id,
+            request_id=getattr(request, "request_id", "") or "",
+            snapshot=context.snapshot,
+            data=data,
+            provider=provider,
+            warnings=warnings,
+            conflicts=[str(item) for item in (result.conflicts or [])],
+            target_card_id=card_id,
+            chapter_version=int(getattr(request, "chapter_version", 0) or 0) or None,
+        )
+
+    # ------------------------------------------------------------------
+    # 合并预览（模块2 新增）
+    # ------------------------------------------------------------------
+    async def merge_preview(self, request: Any) -> Dict[str, Any]:
+        """把抽取候选合并进已有卡片时，产出字段级差异预览。
+
+        合并预览是确定性计算，不调用大模型：候选字段与卡片当前值逐字段比对，
+        区分「字段有差异」与「新增字段」，供用户逐字段勾选后再正式合并。
+
+        Args:
+            request: 请求模型，需包含 novel_id、card_id 与 candidate 字段。
+
+        Returns:
+            包含 field_diffs / new_fields 的预览结果。
+
+        Raises:
+            InvalidIdError: 缺少 card_id 或卡片类型非法。
+            NotFoundError: 卡片不存在或不属于该小说。
+        """
+        novel_id = request.novel_id
+        card_id = str(getattr(request, "card_id", "") or "").strip()
+        if not card_id:
+            raise InvalidIdError("缺少 card_id")
+        card = await self.card_repo.get_card_by_business_id(novel_id, card_id)
+        card_type = self._validate_type(card.get("type", ""))
+        allowed_fields = set(CARD_TYPES[card_type]["fields"].keys())
+
+        candidate = getattr(request, "candidate", None) or {}
+        candidate_fields = {
+            str(key): str(value)
+            for key, value in (candidate.get("fields") or {}).items()
+            if str(key).strip() and str(value).strip() and key in allowed_fields
+        }
+
+        current_fields = card.get("fields") or {}
+        field_diffs: List[Dict[str, Any]] = []
+        new_fields: List[str] = []
+        warnings: List[str] = []
+        for field, value in candidate_fields.items():
+            current_value = str(current_fields.get(field) or "").strip()
+            if not current_value:
+                new_fields.append(field)
+                field_diffs.append(
+                    {
+                        "field": field,
+                        "current_value": "",
+                        "incoming_value": value,
+                        # 空白字段默认勾选，有值字段默认不覆盖，避免误改用户已确认内容
+                        "selected": True,
+                    }
+                )
+            elif current_value != value:
+                field_diffs.append(
+                    {
+                        "field": field,
+                        "current_value": current_value,
+                        "incoming_value": value,
+                        "selected": False,
+                    }
+                )
+
+        dropped = [
+            str(key)
+            for key in (candidate.get("fields") or {})
+            if str(key).strip() and key not in allowed_fields
+        ]
+        if dropped:
+            warnings.append(f"候选字段 {', '.join(dropped)} 不属于该类型，已忽略")
+
+        return {
+            "candidate_name": str(candidate.get("name") or ""),
+            "target_card_id": card_id,
+            "target_card_name": str(card.get("name") or ""),
+            "field_diffs": field_diffs,
+            "new_fields": new_fields,
+            "warnings": warnings,
+        }
 
 
 setting_card_generation_service = SettingCardGenerationService()

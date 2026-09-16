@@ -260,6 +260,12 @@ class AICreateNovelRequest(BaseModel):
     presence_penalty: float | None = Field(default=None, ge=-2, le=2)
     frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
     system_prompt: str | None = Field(default=None)
+    # 模块4：生成模式与已确认蓝图绑定，guid 模式且蓝图已确认时以蓝图为准
+    generation_mode: str = Field(default="quick", pattern="^(quick|guided)$")
+    # 引导模式：蓝图所属小说 ID + 蓝图业务 ID，用于校验归属与确认状态
+    novel_id: str | None = Field(default=None)
+    blueprint_id: str | None = Field(default=None)
+    blueprint_version: int | None = Field(default=None, ge=1)
 
 
 class NovelRewriteChatMessage(BaseModel):
@@ -1070,6 +1076,44 @@ async def rewrite_novel_field_stream(req: NovelFieldRewriteRequest):
     return _sse_response(event_stream())
 
 
+async def _load_confirmed_blueprint(req: "AICreateNovelRequest") -> dict | None:
+    """加载并校验引导模式绑定的蓝图。
+
+    校验规则：必须提供所属小说 ID 与蓝图业务 ID；蓝图必须存在且属于该小说；
+    蓝图必须已确认；若客户端带了版本号，则必须与服务器版本一致。
+
+    Args:
+        req: AI 创建小说请求。
+
+    Returns:
+        校验通过的蓝图；不满足条件时返回 None。
+    """
+    if not req.blueprint_id or not req.novel_id:
+        return None
+    try:
+        from backend.services.novel.blueprint_service import blueprint_service
+
+        blueprint = await blueprint_service.get_blueprint(req.novel_id, req.blueprint_id)
+    except Exception as exc:
+        logger.warning("加载蓝图失败，已回退为快速模式: %s", exc)
+        return None
+    if str(blueprint.get("status") or "") != "confirmed":
+        logger.warning("蓝图 %s 尚未确认，拒绝用于生成", req.blueprint_id)
+        return None
+    if (
+        req.blueprint_version is not None
+        and int(blueprint.get("version") or 0) != int(req.blueprint_version)
+    ):
+        logger.warning(
+            "蓝图 %s 版本不匹配（客户端 %s，服务器 %s）",
+            req.blueprint_id,
+            req.blueprint_version,
+            blueprint.get("version"),
+        )
+        return None
+    return blueprint
+
+
 @router.post("/create-novel-by-ai")
 async def create_novel_by_ai(req: AICreateNovelRequest):
     """4 步 LLM 管道（SSE 流式）：expand_idea → extract_idea → core_seed → novel_meta。
@@ -1087,6 +1131,35 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
         prompts = _load_prompts().get("create_novel_by_ai", {})
         gen_kwargs = build_generation_kwargs(req)
         cached_prefix = _get_contiguous_cached_steps(req.cached_steps)
+        # 模块4：引导模式绑定已确认蓝图，把蓝图内容并入创作输入。
+        # 未确认的蓝图一律拒绝使用，避免用草稿内容生成正式小说。
+        user_idea = req.user_idea
+        bound_blueprint: dict | None = None
+        if req.generation_mode == "guided":
+            blueprint = await _load_confirmed_blueprint(req)
+            if blueprint is None:
+                yield _sse_event(
+                    "done",
+                    {
+                        "success": False,
+                        "failed_step": "blueprint",
+                        "error": "引导模式必须绑定一条已确认的蓝图，并提供其所属小说 ID",
+                    },
+                )
+                return
+            bound_blueprint = blueprint
+            user_idea = (
+                f"{user_idea}\n\n【已确认创作蓝图】\n"
+                f"剧情摘要：{blueprint.get('plot_summary') or '（未填写）'}\n"
+                f"世界观：{blueprint.get('worldview') or '（未填写）'}"
+            )
+            _log_workflow_event(
+                request_id,
+                "blueprint",
+                "bound",
+                blueprint_id=req.blueprint_id,
+                blueprint_version=blueprint.get("version"),
+            )
         expanded: ExpandIdeaSchema | None = None
         idea: ExtractIdeaSchema | None = None
         seed: CoreSeedSchema | None = None
@@ -1128,7 +1201,7 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
                 suffix0 = "expand_idea_to_full_novel_story_prompt_without_schema_suffix" if use_stream0 else ("expand_idea_to_full_novel_story_prompt_with_schema_suffix" if use_schema0 else "expand_idea_to_full_novel_story_prompt_without_schema_suffix")
                 prompt0 = (
                     prompts["expand_idea_to_full_novel_story_prompt_base"].format(
-                        user_idea=req.user_idea,
+                        user_idea=user_idea,
                     )
                     + "\n"
                     + prompts[suffix0]
@@ -1442,6 +1515,13 @@ async def create_novel_by_ai(req: AICreateNovelRequest):
         yield _sse_event("done", {
             "success": True,
             "result": final_result,
+            "mode": req.generation_mode,
+            "blueprint_id": bound_blueprint.get("blueprint_id") if bound_blueprint else None,
+            "blueprint_version": (
+                int(bound_blueprint.get("version") or 1) if bound_blueprint else None
+            ),
+            "outline_status": "not_started",
+            "chapter_generation_status": "not_started",
         })
 
     return _sse_response(event_stream())

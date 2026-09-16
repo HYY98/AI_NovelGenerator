@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator
@@ -11,10 +12,52 @@ from pydantic import BaseModel
 from backend.llm.config import LLMProviderConfig
 from backend.llm.models import LLMFunctionCallProbe, LLMRequest, LLMResponse
 
+logger = logging.getLogger(__name__)
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_OPEN_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+
+# 结构化输出的安全下限：低于该值的请求级上限在本项目业务里必然截断
+MIN_OUTPUT_TOKENS = 512
+# 截断后的自动放大策略：放大倍数、放大的最低目标、放大硬上限
+TRUNCATION_RETRY_FACTOR = 4
+TRUNCATION_RETRY_MIN_TOKENS = 2048
+MAX_OUTPUT_TOKENS_CEILING = 32000
+
+
+def is_length_limit_error(exc: BaseException) -> bool:
+    """判断异常是否表示「输出被长度上限截断」。
+
+    以字符串与类名双重判定，兼容 OpenAI SDK 的 LengthFinishReasonError
+    以及其他 Provider 网关返回的文本型报错，避免对 SDK 版本产生硬依赖。
+    """
+    if type(exc).__name__ == "LengthFinishReasonError":
+        return True
+    return "length limit was reached" in str(exc)
+
+
+def plan_truncation_retry(
+    requested_tokens: int | None,
+    provider_default: int | None,
+) -> int | None:
+    """计算截断后应使用的更大输出预算；无法继续放大时返回 None。
+
+    Args:
+        requested_tokens: 本次请求实际使用的 max_tokens。
+        provider_default: Provider 配置里的默认 max_tokens。
+
+    Returns:
+        放大后的输出预算；已到硬上限或无法放大时返回 None。
+    """
+    current = int(requested_tokens or 0)
+    target = max(
+        current * TRUNCATION_RETRY_FACTOR,
+        TRUNCATION_RETRY_MIN_TOKENS,
+        int(provider_default or 0),
+    )
+    target = min(target, MAX_OUTPUT_TOKENS_CEILING)
+    return target if target > current else None
 
 
 class _ThinkStreamFilter:
@@ -121,7 +164,25 @@ class BaseLLMClient(ABC):
         if request.top_p is None and cfg.top_p is not None:
             overrides["top_p"] = cfg.top_p
         if request.max_tokens is None and cfg.max_tokens is not None:
-            overrides["max_tokens"] = cfg.max_tokens
+            safe_default = max(int(cfg.max_tokens), MIN_OUTPUT_TOKENS)
+            if safe_default != int(cfg.max_tokens):
+                logger.warning(
+                    "Provider %s 配置的 max_tokens=%s 低于安全下限 %s，已按 %s 使用",
+                    self.provider_name,
+                    cfg.max_tokens,
+                    MIN_OUTPUT_TOKENS,
+                    safe_default,
+                )
+            overrides["max_tokens"] = safe_default
+        elif request.max_tokens is not None and int(request.max_tokens) < MIN_OUTPUT_TOKENS:
+            # 低于安全下限的请求级上限会让结构化输出必然被截断，这里提升到下限并留痕
+            logger.warning(
+                "请求级 max_tokens=%s 低于安全下限 %s，已自动提升（provider=%s）",
+                request.max_tokens,
+                MIN_OUTPUT_TOKENS,
+                self.provider_name,
+            )
+            overrides["max_tokens"] = MIN_OUTPUT_TOKENS
         if request.presence_penalty is None and cfg.presence_penalty is not None:
             overrides["presence_penalty"] = cfg.presence_penalty
         if request.frequency_penalty is None and cfg.frequency_penalty is not None:

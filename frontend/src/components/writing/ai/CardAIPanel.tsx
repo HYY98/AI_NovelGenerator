@@ -3,17 +3,21 @@
 import { useMemo, useState } from "react";
 import { ApiRequestError } from "@/lib/api";
 import type {
+  AIEnvelope,
   CardCandidate,
   CardCompleteResult,
   CardConflictItem,
   CardExtractItem,
+  CardRewriteResult,
 } from "@/lib/aiTypes";
 import { newRequestId } from "@/lib/aiTypes";
 import {
+  acceptSettingCardCandidate,
   checkSettingCardConflicts,
   completeSettingCard,
   extractSettingCards,
   generateSettingCard,
+  rewriteSettingCard,
 } from "@/lib/chapterAiApi";
 import { AIButton, AISection, AIWarnings, AdoptRow, SeverityBadge } from "./AIShared";
 
@@ -77,6 +81,13 @@ export default function CardAIPanel({
   const [lockedFields, setLockedFields] = useState<Record<string, boolean>>({ name: true, current_state: true });
   const [extractItems, setExtractItems] = useState<CardExtractItem[] | null>(null);
   const [conflictItems, setConflictItems] = useState<CardConflictItem[] | null>(null);
+
+  // 增量新增：AI 改写候选与字段级确认状态
+  const [rewriteResult, setRewriteResult] = useState<AIEnvelope<CardRewriteResult> | null>(null);
+  const [rewriteTargets, setRewriteTargets] = useState<Record<string, boolean>>({});
+  const [adoptedFields, setAdoptedFields] = useState<Record<string, boolean>>({});
+  const [confirmHardRule, setConfirmHardRule] = useState(false);
+  const [adopting, setAdopting] = useState(false);
 
   const labelOf = useMemo(() => {
     const map = new Map(fieldLabels);
@@ -179,6 +190,88 @@ export default function CardAIPanel({
       setInfo(res.data.conflicts.length ? "发现潜在冲突，请逐条核对" : "未发现明显冲突");
     });
 
+  /** 增量新增：请求 AI 改写选中字段，只返回字段级候选补丁。 */
+  const doRewrite = () =>
+    run("rewrite", async () => {
+      if (!novelId || !card) return;
+      const fields = Object.entries(rewriteTargets)
+        .filter(([, value]) => value)
+        .map(([key]) => key);
+      if (!fields.length) {
+        setError("请先勾选要改写的字段");
+        return;
+      }
+      const locked = Object.entries(lockedFields)
+        .filter(([, value]) => value)
+        .map(([key]) => key);
+      const res = await rewriteSettingCard(card.card_id, {
+        novel_id: novelId,
+        fields,
+        instruction: userPrompt,
+        locked_fields: locked,
+        expected_version: card.version,
+        request_id: newRequestId("rw"),
+      });
+      setRewriteResult(res);
+      setAdoptedFields(
+        Object.fromEntries(res.data.changed_fields.map((diff) => [diff.field, true]))
+      );
+      setConfirmHardRule(false);
+      setWarnings(res.warnings);
+      setConflicts(res.conflicts);
+      setInfo(
+        res.data.changed_fields.length
+          ? "已生成字段级改写候选，勾选后才会写入正式卡片"
+          : "AI 没有给出可写入的字段改动"
+      );
+    });
+
+  /** 增量新增：通过统一采纳接口写入选中的字段改动。 */
+  const applyRewrite = async () => {
+    if (!novelId || !card || !rewriteResult) return;
+    const selected: Record<string, string> = {};
+    for (const diff of rewriteResult.data.changed_fields) {
+      if (adoptedFields[diff.field]) selected[diff.field] = diff.new_value;
+    }
+    if (!Object.keys(selected).length) {
+      setError("请至少勾选一个要写入的字段");
+      return;
+    }
+    const hasProtected = rewriteResult.data.changed_fields.some(
+      (diff) => adoptedFields[diff.field] && diff.protected
+    );
+    if (hasProtected && !confirmHardRule) {
+      setError("勾选了受保护字段（名称 / 当前状态 / 硬规则），请先确认后再写入");
+      return;
+    }
+    setAdopting(true);
+    try {
+      const res = await acceptSettingCardCandidate({
+        novel_id: novelId,
+        generation_id: rewriteResult.candidate_id,
+        action: "rewrite",
+        target_card_id: card.card_id,
+        selected_fields: selected,
+        expected_card_version: card.version,
+        confirm_hard_rule: confirmHardRule,
+      });
+      onApplyFields(selected, "AI 改写采纳");
+      setRewriteResult(null);
+      setInfo(res.message ?? "已把选中的改写字段写入卡片");
+    } catch (err) {
+      const message =
+        err instanceof ApiRequestError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "采纳改写候选失败";
+      setError(message);
+      onError(message);
+    } finally {
+      setAdopting(false);
+    }
+  };
+
   const applySelectedFields = () => {
     if (!completeResult) return;
     const fields: Record<string, string> = {};
@@ -238,11 +331,17 @@ export default function CardAIPanel({
           onClick={doCheckConflicts}
           disabled={!!busy || !card || !!card.is_deleted}
         />
+        <AIButton
+          label="AI 改写字段"
+          onClick={doRewrite}
+          disabled={!!busy || !card || !!card.is_deleted}
+          title="只生成字段级候选，确认后才写入"
+        />
       </div>
 
       {card && (
-        <div className="rounded-lg border border-border bg-surface-secondary p-2">
-          <div className="mb-1 text-xs text-muted">
+        <div className="space-y-2 rounded-lg border border-border bg-surface-secondary p-2">
+          <div className="text-xs text-muted">
             锁定字段（AI 补全时不得返回或改写这些字段）
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1">
@@ -255,6 +354,26 @@ export default function CardAIPanel({
                     checked={!!lockedFields[key]}
                     onChange={() =>
                       setLockedFields((prev) => ({ ...prev, [key]: !prev[key] }))
+                    }
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+          </div>
+          {/* 增量新增：AI 改写目标字段；受保护字段默认不勾选 */}
+          <div className="border-t border-border pt-2 text-xs text-muted">
+            AI 改写目标字段（名称 / 当前状态为受保护字段，需二次确认）
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {([["name", "名称"], ["current_state", "当前状态"]] as [string, string][])
+              .concat(fieldLabels)
+              .map(([key, label]) => (
+                <label key={`rw-${key}`} className="flex items-center gap-1 text-xs text-muted">
+                  <input
+                    type="checkbox"
+                    checked={!!rewriteTargets[key]}
+                    onChange={() =>
+                      setRewriteTargets((prev) => ({ ...prev, [key]: !prev[key] }))
                     }
                   />
                   <span>{label}</span>
@@ -315,6 +434,75 @@ export default function CardAIPanel({
               </div>
             </div>
           ))}
+        </AISection>
+      )}
+
+      {/* 增量新增：字段级 diff 预览，确认后才通过统一采纳接口写入 */}
+      {rewriteResult && (
+        <AISection
+          title="AI 改写候选"
+          hint="逐字段确认，受保护字段需要二次确认才会写入"
+          actions={
+            <div className="flex gap-2">
+              <AIButton
+                label={adopting ? "写入中…" : "确认写入选中字段"}
+                tone="primary"
+                onClick={applyRewrite}
+                disabled={adopting}
+              />
+              <AIButton label="丢弃" onClick={() => setRewriteResult(null)} disabled={adopting} />
+            </div>
+          }
+        >
+          {rewriteResult.data.changed_fields.length === 0 && (
+            <div className="text-xs text-muted">AI 没有给出可写入的字段改动</div>
+          )}
+          {rewriteResult.data.changed_fields.map((diff) => (
+            <div key={diff.field} className="rounded border border-border bg-surface px-2 py-2 text-xs">
+              <label className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={!!adoptedFields[diff.field]}
+                  onChange={() =>
+                    setAdoptedFields((prev) => ({ ...prev, [diff.field]: !prev[diff.field] }))
+                  }
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-foreground">{labelOf(diff.field)}</span>
+                    {diff.protected && (
+                      <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] text-red-600">
+                        受保护字段
+                      </span>
+                    )}
+                  </span>
+                  <span className="mt-1 block rounded bg-surface-secondary px-2 py-1 text-muted line-through">
+                    {diff.old_value || "（空）"}
+                  </span>
+                  <span className="mt-1 block rounded bg-accent/10 px-2 py-1 text-foreground">
+                    {diff.new_value || "（空）"}
+                  </span>
+                  {diff.note && <span className="mt-1 block text-muted">说明：{diff.note}</span>}
+                </span>
+              </label>
+            </div>
+          ))}
+          {rewriteResult.data.preserved_fields.length > 0 && (
+            <div className="text-xs text-muted">
+              保持不变的字段：{rewriteResult.data.preserved_fields.map(labelOf).join("、")}
+            </div>
+          )}
+          {rewriteResult.data.changed_fields.some((diff) => diff.protected) && (
+            <label className="flex items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-600">
+              <input
+                type="checkbox"
+                checked={confirmHardRule}
+                onChange={() => setConfirmHardRule((prev) => !prev)}
+              />
+              <span>我确认要修改受保护字段（名称 / 当前状态 / 硬规则）</span>
+            </label>
+          )}
         </AISection>
       )}
 

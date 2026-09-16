@@ -149,6 +149,10 @@ async def save_record(
     provider: str,
     warnings: List[str],
     conflicts: List[str],
+    blueprint_version: int | None = None,
+    chapter_version: int | None = None,
+    target_card_id: str = "",
+    outline_version: int | None = None,
 ) -> Dict[str, Any]:
     """写入生成记录并返回候选响应体。
 
@@ -163,6 +167,10 @@ async def save_record(
         provider: Provider 别名。
         warnings: 生成告警。
         conflicts: 冲突说明。
+        blueprint_version: 生成时的蓝图版本快照，用于确认前校验是否过期。
+        chapter_version: 生成时的章节版本快照，用于确认前校验是否过期。
+        target_card_id: 本次生成针对的目标卡片业务 ID。
+        outline_version: 生成时的大纲版本快照，用于确认前校验是否过期。
 
     Returns:
         统一的候选响应体。
@@ -174,12 +182,18 @@ async def save_record(
             "kind": kind,
             "chapter_id": chapter_id,
             "card_id": card_id,
+            # 增量新增：透传客户端幂等 ID，保证相同 request_id 重试可复用候选
             "request_id": request_id,
             "input_snapshot": snapshot,
             "result": payload,
             "provider": provider,
             "model": provider_model(provider),
             "status": "completed",
+            # 模块3.6：生成时的版本快照与目标卡片，供统一采纳时校验
+            "blueprint_version": blueprint_version,
+            "chapter_version": chapter_version,
+            "outline_version": outline_version,
+            "target_card_id": target_card_id,
         },
     )
     return {

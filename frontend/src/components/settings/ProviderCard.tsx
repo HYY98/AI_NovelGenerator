@@ -100,8 +100,6 @@ const TEST_STEPS: { capability: ProviderTestCapability; labelKey: string }[] = [
   { capability: "function_calling", labelKey: "test.functionCalling" },
 ];
 
-const ALIAS_REGEX = /^[a-zA-Z0-9_]+$/;
-
 export function ProviderCard({ config, onChange, onProviderRename }: Props) {
   const t = useTranslations("settings.provider");
   const [newAlias, setNewAlias] = useState("");
@@ -161,8 +159,8 @@ export function ProviderCard({ config, onChange, onProviderRename }: Props) {
 
   const addProvider = () => {
     const trimmed = newAlias.trim();
-    if (!trimmed || !ALIAS_REGEX.test(trimmed)) {
-      setAliasError(t("aliasRule"));
+    if (!trimmed) {
+      setAliasError(t("aliasEmpty"));
       return;
     }
     if (trimmed in providers) {
@@ -200,8 +198,8 @@ export function ProviderCard({ config, onChange, onProviderRename }: Props) {
 
   const confirmRename = (alias: string) => {
     const trimmed = renameValue.trim();
-    if (!trimmed || !ALIAS_REGEX.test(trimmed)) {
-      setRenameError(t("aliasRule"));
+    if (!trimmed) {
+      setRenameError(t("aliasEmpty"));
       return;
     }
     if (trimmed === alias) {
@@ -842,10 +840,11 @@ function ProviderDetail({
             />
             <OptionalNumberParam
               label={t("genParams.maxTokens")}
+              description={t("genParams.maxTokensHint")}
               value={provider.max_tokens}
               onToggle={(enabled) => onChange({ max_tokens: enabled ? 4096 : null })}
               onValueChange={(value) => onChange({ max_tokens: value })}
-              min={256}
+              min={512}
               max={1000000}
               step={256}
             />

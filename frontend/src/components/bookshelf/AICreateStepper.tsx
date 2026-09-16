@@ -19,10 +19,21 @@ import {
   GenerationParamsCollapse,
   type GenerationParamsValue,
 } from "@/components/shared/GenerationParamsCollapse";
-import type { AICreateCachedSteps, AICreateRequest, AICreateResponse, AICreateStepKey } from "@/types/novel";
+import type {
+  AICreateCachedSteps,
+  AICreateDoneExtra,
+  AICreateRequest,
+  AICreateResponse,
+  AICreateStepKey,
+} from "@/types/novel";
+import type { GenerationMode, NovelBlueprint } from "@/types/novelBlueprint";
+import GenerationModeSelector from "@/components/novel-generation/GenerationModeSelector";
+import NovelBlueprintWizard from "@/components/novel-generation/NovelBlueprintWizard";
 
 interface AICreateStepperProps {
   onComplete: (result: AICreateResponse, chapters: number, wordsPerChapter: number) => void;
+  /** 增量新增：已存在小说时传入，用于在建书流程内直接确认蓝图。 */
+  novelId?: string;
 }
 
 type StepStatus = "pending" | "running" | "done" | "error";
@@ -84,8 +95,13 @@ function mergePartialResult(current: AICreateCachedSteps, data: unknown): AICrea
   });
 }
 
-export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
+export default function AICreateStepper({ onComplete, novelId }: AICreateStepperProps) {
   const t = useTranslations("create");
+  // 增量新增：生成模式与设定向导状态；quick 模式保持原有四步建书行为
+  const [generationMode, setGenerationMode] = useState<GenerationMode>("quick");
+  const [showWizard, setShowWizard] = useState(false);
+  const [blueprint, setBlueprint] = useState<NovelBlueprint | null>(null);
+  const [genStatus, setGenStatus] = useState<AICreateDoneExtra | null>(null);
   const [initialCache] = useState(() => loadAICreateCache());
   const initialSteps = initialCache?.steps ?? {};
   const [idea, setIdea] = useState(initialCache?.input.user_idea ?? "");
@@ -110,6 +126,10 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
 
   const hasFailedStep = steps.some((step) => step.status === "error");
   const hasCachedSteps = hasAICreateCachedSteps(cachedSteps);
+  // 引导模式只允许使用已落库且已确认的蓝图；新建小说需先创建项目后再进入设定中心。
+  const needsBlueprint = generationMode === "guided" && (
+    !novelId || blueprint?.status !== "confirmed"
+  );
 
   const getCurrentInput = (
     nextIdea = idea,
@@ -175,6 +195,15 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
       words_per_chapter: input.words_per_chapter,
       ...(hasAICreateCachedSteps(normalizedCachedSteps) && { cached_steps: normalizedCachedSteps }),
       ...buildGenerationParamsPayload(genParams),
+      // 增量新增：guided 模式携带已确认蓝图，quick 模式保持原请求体语义
+      generation_mode: generationMode,
+      ...(generationMode === "guided" && blueprint
+        ? {
+            novel_id: novelId ?? null,
+            blueprint_id: blueprint.blueprint_id || null,
+            blueprint_version: blueprint.version || 1,
+          }
+        : {}),
     };
 
     try {
@@ -220,6 +249,18 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
             if (data.success && data.result) {
               const res = data.result as AICreateResponse;
               setResult(res);
+              // 增量新增：记录蓝图版本、大纲确认状态与章节生成状态
+              setGenStatus({
+                mode: generationMode,
+                blueprint_id: typeof data.blueprint_id === "string" ? data.blueprint_id : null,
+                blueprint_version:
+                  typeof data.blueprint_version === "number" ? data.blueprint_version : null,
+                outline_status: typeof data.outline_status === "string" ? data.outline_status : null,
+                chapter_generation_status:
+                  typeof data.chapter_generation_status === "string"
+                    ? data.chapter_generation_status
+                    : null,
+              });
               onComplete(res, input.number_of_chapters, input.words_per_chapter);
             }
           }
@@ -253,8 +294,71 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
         ? t("continueAI")
         : t("startAI");
 
+  // 增量新增：设定模式下先完成蓝图向导，再进入建书流程
+  if (generationMode === "guided" && showWizard) {
+    return (
+      <div className="space-y-4 p-1">
+        <NovelBlueprintWizard
+          novelId={novelId}
+          initialMode="guided"
+          initialBlueprint={blueprint}
+          onCancel={() => setShowWizard(false)}
+          onConfirmed={(next) => {
+            setBlueprint(next);
+            setShowWizard(false);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 p-1">
+      {/* 增量新增：生成模式选择 */}
+      <div>
+        <label className="block text-sm font-medium text-foreground mb-2">
+          {t("generationModeLabel")}
+        </label>
+        <GenerationModeSelector
+          value={generationMode}
+          onChange={(mode) => setGenerationMode(mode)}
+          disabled={isRunning}
+        />
+      </div>
+
+      {/* 增量新增：设定模式下的蓝图入口与状态 */}
+      {generationMode === "guided" && (
+        <div className="space-y-2 rounded-xl border border-border bg-surface-secondary p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium text-foreground">{t("blueprintStatus")}</div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onPress={() => setShowWizard(true)}
+              isDisabled={isRunning}
+            >
+              {blueprint ? t("editBlueprint") : t("openBlueprintWizard")}
+            </Button>
+          </div>
+          <div className="grid gap-1 text-xs text-muted sm:grid-cols-3">
+            <span>
+              {t("blueprintVersion")}：
+              {blueprint?.version ?? genStatus?.blueprint_version ?? t("statusNotGenerated")}
+            </span>
+            <span>
+              {t("outlineStatus")}：{genStatus?.outline_status ?? t("statusNotGenerated")}
+            </span>
+            <span>
+              {t("chapterStatus")}：
+              {genStatus?.chapter_generation_status ?? t("statusNotGenerated")}
+            </span>
+          </div>
+          {needsBlueprint && (
+            <p className="text-xs text-amber-600">{t("blueprintRequiredHint")}</p>
+          )}
+        </div>
+      )}
+
       {/* Idea Input */}
       <div>
         <label className="block text-sm font-medium text-foreground mb-2">
@@ -370,7 +474,7 @@ export default function AICreateStepper({ onComplete }: AICreateStepperProps) {
       <Button
         variant="primary"
         className="w-full"
-        isDisabled={isRunning || !idea.trim()}
+        isDisabled={isRunning || !idea.trim() || needsBlueprint}
         onPress={startGeneration}
       >
         {buttonLabel}

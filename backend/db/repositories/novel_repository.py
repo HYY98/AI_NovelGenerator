@@ -1,9 +1,61 @@
 from typing import Any, Dict, List, Optional
+from pymongo import ReturnDocument
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from backend.db.base import BaseRepository
-from backend.db.utils import to_object_id
-from backend.db.errors import NotFoundError, InvalidIdError
+from backend.db.utils import get_utc_now, to_object_id
+from backend.db.errors import NotFoundError, InvalidIdError, DuplicateKeyError
+
+# 小说可编辑字段白名单：更新接口只接受这些字段，其余一律忽略
+NOVEL_EDITABLE_FIELDS = (
+    "title",
+    "subtitle",
+    "genre",
+    "tags",
+    "status",
+    "synopsis",
+    "outline",
+    "cover_image",
+    "world_time_period",
+    "world_atmosphere",
+    "world_social_structure",
+    "world_technology_level",
+    "power_system_name",
+    "power_system_description",
+    # 模块3.1：生成模式、蓝图状态与版本、战力体系引用、正文分析版本
+    "generation_mode",
+    "blueprint_status",
+    "blueprint_version",
+    "power_system_id",
+    "last_analyzed_chapter_version",
+)
+
+_PROTECTED_FIELDS = {
+    "_id",
+    "created_at",
+    "updated_at",
+    "is_deleted",
+    "deleted_at",
+    "version",
+    "current_volume_count",
+    "current_chapter_count",
+    "current_word_count",
+}
+
+
+def _novel_version_clause(expected_version: int) -> Dict[str, Any]:
+    """构造兼容缺失历史版本字段的小说乐观锁条件。
+
+    Args:
+        expected_version: 客户端基于的小说版本。
+
+    Returns:
+        可合并进 MongoDB 查询的版本条件。
+    """
+    if expected_version == 1:
+        return {"$or": [{"version": 1}, {"version": {"$exists": False}}]}
+    return {"version": expected_version}
+
 
 class NovelRepository(BaseRepository):
     def __init__(self):
@@ -83,6 +135,69 @@ class NovelRepository(BaseRepository):
         if not novel:
             raise NotFoundError(f"Novel with id {novel_id} not found")
         return novel
+
+    async def update_novel(
+        self,
+        novel_id: str,
+        update_data: Dict[str, Any],
+        *,
+        expected_version: int,
+        session: AsyncClientSession | None = None,
+    ) -> Dict[str, Any]:
+        """按乐观锁更新小说可编辑字段。
+
+        只接受 NOVEL_EDITABLE_FIELDS 内的字段，version 由服务端原子自增，
+        版本不匹配时抛 DuplicateKeyError 由上层转成 409。
+
+        Args:
+            novel_id: 小说 ObjectId 字符串。
+            update_data: 待更新字段，会被白名单过滤。
+            expected_version: 客户端基于的小说版本。
+            session: 可选 MongoDB 会话，用于事务写入。
+
+        Returns:
+            更新后的小说文档。
+
+        Raises:
+            ValueError: 没有提供任何可编辑字段。
+            NotFoundError: 小说不存在。
+            DuplicateKeyError: 版本冲突。
+        """
+        filtered = {
+            key: value
+            for key, value in update_data.items()
+            if key in NOVEL_EDITABLE_FIELDS and key not in _PROTECTED_FIELDS
+        }
+        if not filtered:
+            raise ValueError("小说更新至少需要提供一个可编辑字段")
+
+        obj_id = to_object_id(novel_id)
+        updated = await self.collection.find_one_and_update(
+            {
+                "_id": obj_id,
+                "is_deleted": False,
+                **_novel_version_clause(expected_version),
+            },
+            {
+                "$set": {
+                    **filtered,
+                    "version": expected_version + 1,
+                    "updated_at": get_utc_now(),
+                }
+            },
+            # 返回写入后的文档，调用方拿到的版本号与最新字段才与库内一致
+            return_document=ReturnDocument.AFTER,
+            session=session,
+        )
+        if updated is None:
+            latest = await self.collection.find_one({"_id": obj_id}, session=session)
+            if latest is None:
+                raise NotFoundError(f"Novel with id {novel_id} not found")
+            raise DuplicateKeyError(
+                f"小说已被其他页面修改（服务器版本 {latest.get('version', 1)}，"
+                f"当前基于版本 {expected_version}），请刷新后重试"
+            )
+        return updated
 
     async def update_novel_info(
         self,

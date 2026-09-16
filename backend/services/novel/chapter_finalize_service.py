@@ -15,12 +15,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from backend.db.errors import DuplicateKeyError, InvalidIdError, NotFoundError
 from backend.db.repositories.chapter_repository import ChapterRepository
+from backend.db.repositories.generation_record_repository import generation_record_repo
+from backend.db.repositories.novel_blueprint_repository import novel_blueprint_repo
 from backend.db.repositories.setting_card_repository import (
     CARD_TYPES,
     SettingCardRepository,
@@ -114,6 +118,9 @@ class FinalizeChapterService:
         blocking = [
             issue for issue in review_data.get("issues", []) if issue.get("severity") == "blocking"
         ]
+        # 增量新增：记录本次审校依据的硬规则签名与蓝图版本，提交时由服务端复核
+        hard_rules = await self.list_hard_rules(novel_id)
+        blueprint = await novel_blueprint_repo.find_confirmed(novel_id)
         return {
             "chapter_id": chapter_biz_id,
             "chapter_version": chapter.get("version", 1),
@@ -123,6 +130,17 @@ class FinalizeChapterService:
             "state_change_events": events,
             "blocking_count": len(blocking),
             "can_finalize": len(blocking) == 0,
+            "hard_rules": [
+                {
+                    "card_id": str(card.get("card_id") or ""),
+                    "name": str(card.get("name") or ""),
+                    "version": int(card.get("version") or 1),
+                }
+                for card in hard_rules
+            ],
+            "hard_rule_signature": _hard_rule_signature(hard_rules),
+            "blueprint_id": str((blueprint or {}).get("blueprint_id") or ""),
+            "blueprint_version": int((blueprint or {}).get("version") or 0) or None,
             "warnings": list(review_response.get("warnings", []) or [])
             + list(proposal_response.get("warnings", []) or []),
         }
@@ -225,6 +243,20 @@ class FinalizeChapterService:
         if set(accepted_ids) & set(rejected_ids):
             raise InvalidIdError("同一条变更不能同时被接受与拒绝")
 
+        # 增量新增：服务端复核审校依据，不信任客户端回传的 blocking_issues
+        hard_rules = await self.list_hard_rules(novel_id)
+        current_signature = _hard_rule_signature(hard_rules)
+        requested_signature = str(getattr(request, "hard_rule_signature", "") or "").strip()
+        if requested_signature and requested_signature != current_signature:
+            raise DuplicateKeyError("硬规则已更新，请重新审校后再定稿")
+        blueprint = await novel_blueprint_repo.find_confirmed(novel_id)
+        current_blueprint_version = int((blueprint or {}).get("version") or 0) or None
+        requested_blueprint_version = getattr(request, "blueprint_version", None)
+        if requested_blueprint_version is not None and int(requested_blueprint_version) != (
+            current_blueprint_version or 0
+        ):
+            raise DuplicateKeyError("创作蓝图已更新，请重新审校后再定稿")
+
         pending = await story_event_repo.list_events(
             novel_id, chapter_id=chapter_biz_id, status="pending"
         )
@@ -239,6 +271,30 @@ class FinalizeChapterService:
             for issue in (getattr(request, "blocking_issues", None) or [])
             if isinstance(issue, dict) and issue.get("severity") == "blocking"
         ]
+        review_generation_id = str(getattr(request, "review_generation_id", "") or "").strip()
+        if review_generation_id:
+            # 以服务端保存的审校记录重新计算 blocking，客户端只能提交忽略/强制定稿意图
+            record = await generation_record_repo.get_owned_record(
+                novel_id, review_generation_id
+            )
+            if str(record.get("kind") or "") != "consistency_review":
+                raise InvalidIdError("定稿引用的审校记录类型不正确")
+            if str(record.get("chapter_id") or "") != chapter_biz_id:
+                raise InvalidIdError("审校记录不属于当前章节")
+            record_version = int(
+                record.get("chapter_version")
+                or (record.get("input_snapshot") or {}).get("chapter_version")
+                or 0
+            )
+            if record_version and record_version != current_version:
+                raise DuplicateKeyError("审校结果基于旧章节版本，请重新审校后再定稿")
+            stored_issues = (record.get("data") or {}).get("issues") or []
+            blocking = [
+                {"id": f"issue-{index}", "severity": "blocking"}
+                for index, issue in enumerate(stored_issues)
+                if isinstance(issue, dict) and issue.get("severity") == "blocking"
+            ]
+        forced = bool(getattr(request, "force", False)) and bool(blocking)
         if blocking:
             # 阻断级问题必须由用户显式确认放弃修改后才能定稿
             unresolved = [issue for issue in blocking if str(issue.get("id") or "") not in set(ignored_issues)]
@@ -246,6 +302,13 @@ class FinalizeChapterService:
                 raise DuplicateKeyError(
                     f"存在 {len(unresolved)} 条阻断级一致性问题，请先修改正文或显式确认忽略后再定稿"
                 )
+        if forced:
+            logger.warning(
+                "章节定稿使用强制定稿 novel_id=%s chapter_id=%s review=%s",
+                novel_id,
+                chapter_biz_id,
+                review_generation_id or "无审校记录",
+            )
 
         applied: List[_AppliedChange] = []
         pending_character: List[Dict[str, Any]] = []
@@ -303,6 +366,8 @@ class FinalizeChapterService:
             "applied_card_changes": [change.__dict__ for change in applied],
             "pending_character_updates": pending_character,
             "next_chapter": navigation.get("next"),
+            "forced": forced,
+            "hard_rule_signature": current_signature,
             "message": "章节已定稿"
             + ("，仍有角色状态变更需在角色页确认" if pending_character else ""),
         }
@@ -389,6 +454,19 @@ class FinalizeChapterService:
         """列出当前生效的硬规则，供前端定稿前展示。"""
         cards = await self.card_repo.list_cards(novel_id, card_type="rule", enabled_only=True)
         return [card for card in cards if coerce_hard_rule_flag(card.get("is_hard_rule"))]
+
+
+def _hard_rule_signature(rules: List[Dict[str, Any]]) -> str:
+    """计算硬规则集合的稳定签名：任一规则版本变化都会导致签名变化。"""
+    payload = json.dumps(
+        sorted(
+            [str(card.get("card_id") or ""), int(card.get("version") or 1)]
+            for card in rules
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _clean_ids(values: Any) -> List[str]:

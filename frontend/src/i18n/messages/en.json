@@ -54,8 +54,8 @@
         "needsTest": "Needs Test"
       },
       "alias": "Provider Alias",
-      "aliasPlaceholder": "e.g. openai_gpt4o",
-      "aliasRule": "Only letters, numbers, and underscores",
+      "aliasPlaceholder": "e.g. teamo-gpt",
+      "aliasEmpty": "Alias cannot be empty",
       "aliasDuplicate": "Alias already exists",
       "renameProvider": "Rename",
       "renameTo": "New Alias",
@@ -122,6 +122,7 @@
         "temperature": "Temperature",
         "topP": "Top P",
         "maxTokens": "Max Tokens",
+        "maxTokensHint": "Too small a limit truncates the output (reasoning tokens count toward it); 2048 or more is recommended",
         "presencePenalty": "Presence Penalty",
         "frequencyPenalty": "Frequency Penalty",
         "systemPrompt": "System Prompt",
@@ -257,6 +258,15 @@
     "stepNovelMeta": "Generate Novel Settings",
     "stepCached": "Cached and reusable for retry",
     "stepComplete": "Generation Complete",
+    "generationModeLabel": "Generation Mode",
+    "blueprintStatus": "Blueprint Status",
+    "openBlueprintWizard": "Open Blueprint Wizard",
+    "editBlueprint": "Edit Blueprint",
+    "blueprintVersion": "Blueprint Version",
+    "outlineStatus": "Outline Status",
+    "chapterStatus": "Chapter Status",
+    "statusNotGenerated": "Not generated",
+    "blueprintRequiredHint": "Guided mode requires a confirmed blueprint before generating",
     "stepFailed": "Generation Failed",
     "retryStep": "Retry",
     "reviewTitle": "AI Generated Preview",
@@ -271,6 +281,7 @@
       "temperature": "Temperature",
       "topP": "Top P",
       "maxTokens": "Max Tokens",
+      "maxTokensHint": "Too small a limit truncates the output (reasoning tokens count toward it); 2048 or more is recommended",
       "presencePenalty": "Presence Penalty",
       "frequencyPenalty": "Frequency Penalty",
       "systemPrompt": "System Prompt",
@@ -291,7 +302,11 @@
       "factionCards": "Factions",
       "itemCards": "Items",
       "ruleCards": "Rules & Settings",
-      "relationshipMap": "Relationship Map"
+      "relationshipMap": "Relationship Map",
+      "generationGroup": "Creation & Sync",
+      "creationBlueprint": "Creation Blueprint",
+      "powerSystem": "Power System",
+      "settingSync": "Chapter Setting Sync"
     },
     "placeholder": {
       "title": "{module}",
@@ -746,6 +761,7 @@
         "generatingCharacters": "Generating full-book core characters",
         "generatingRelations": "Generating the character relationship network",
         "generatingHint": "The generation request is in progress. Candidate review will open automatically when it finishes.",
+        "progressChars": "Generated {count} characters",
         "cancelGeneration": "Cancel Generation"
       },
       "candidate": {

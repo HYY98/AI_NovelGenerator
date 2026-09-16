@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from backend.db.repositories.chapter_repository import ChapterRepository
+from backend.db.repositories.novel_blueprint_repository import novel_blueprint_repo
+from backend.db.repositories.power_system_repository import power_system_repo
 from backend.db.repositories.setting_card_repository import (
     CARD_TYPES,
     SettingCardRepository,
@@ -35,6 +37,9 @@ CORE_CARD_IMPORTANCE = 4
 FIELD_TEXT_LIMIT = 400
 # 续写时携带的前文尾部字数
 CONTINUE_TAIL_CHARS = 1500
+# 战力体系与创作蓝图注入提示词的最大长度，避免超长设定挤爆上下文
+POWER_SYSTEM_TEXT_LIMIT = 900
+BLUEPRINT_TEXT_LIMIT = 600
 
 # 三类卡在提示词中的分区标题与重点字段
 CARD_PROMPT_SECTIONS: Dict[str, Dict[str, Any]] = {
@@ -88,6 +93,9 @@ class ChapterContext:
     previous_summary: str = ""
     recent_summaries: List[Dict[str, Any]] = field(default_factory=list)
     unresolved_threads: List[str] = field(default_factory=list)
+    # 增量新增：已确认的战力体系与创作蓝图，只有确认版本才会注入
+    power_system: Optional[Dict[str, Any]] = None
+    blueprint: Optional[Dict[str, Any]] = None
     snapshot: Dict[str, Any] = field(default_factory=dict)
     text: str = ""
     # 当前小说真实存在的业务 ID，用于校验 AI 返回的 used_entities / 状态变更候选
@@ -202,6 +210,59 @@ def _render_summary_block(context: "ChapterContext") -> str:
     return "\n\n".join(parts)
 
 
+def _render_power_system_block(power_system: Dict[str, Any]) -> str:
+    """渲染结构化战力体系分区文本。"""
+    lines = [f"体系名称：{_clip(power_system.get('name'), 80)}"]
+    if power_system.get("description"):
+        lines.append(f"体系说明：{_clip(power_system.get('description'), 240)}")
+    levels = power_system.get("levels") or []
+    if isinstance(levels, list) and levels:
+        ordered = sorted(
+            (item for item in levels if isinstance(item, dict)),
+            key=lambda item: _safe_int(item.get("order")),
+        )
+        lines.append("境界/等级（从低到高）：")
+        for item in ordered[:20]:
+            name = _clip(item.get("name"), 40) or "未命名"
+            detail = _clip(item.get("description"), 120)
+            lines.append(f"- {name}：{detail}" if detail else f"- {name}")
+    dimensions = power_system.get("power_dimensions") or []
+    if isinstance(dimensions, list) and dimensions:
+        lines.append("战力维度：" + "、".join(str(item) for item in dimensions[:10]))
+    resource = power_system.get("resource")
+    if isinstance(resource, dict) and resource:
+        parts = [
+            f"{key}：{_clip(value, 80)}"
+            for key, value in resource.items()
+            if str(value or "").strip()
+        ]
+        if parts:
+            lines.append("能量/资源：" + "；".join(parts[:6]))
+    restrictions = power_system.get("restrictions") or []
+    if isinstance(restrictions, list) and restrictions:
+        lines.append(
+            "限制条件：" + "、".join(_clip(item, 80) for item in restrictions[:8])
+        )
+    counters = power_system.get("counters") or []
+    if isinstance(counters, list) and counters:
+        lines.append(
+            "克制关系：" + _clip(json.dumps(counters, ensure_ascii=False, default=str), 200)
+        )
+    return _clip("【战力体系（已确认）】\n" + "\n".join(lines), POWER_SYSTEM_TEXT_LIMIT)
+
+
+def _render_blueprint_block(blueprint: Dict[str, Any]) -> str:
+    """渲染已确认创作蓝图分区文本。"""
+    parts: List[str] = []
+    if str(blueprint.get("plot_summary") or "").strip():
+        parts.append(f"大致剧情：{_clip(blueprint.get('plot_summary'), 300)}")
+    if str(blueprint.get("worldview") or "").strip():
+        parts.append(f"世界观：{_clip(blueprint.get('worldview'), 300)}")
+    if not parts:
+        return ""
+    return _clip("【创作蓝图（已确认）】\n" + "\n".join(parts), BLUEPRINT_TEXT_LIMIT)
+
+
 def _compute_context_hash(text: str) -> str:
     """计算上下文文本的稳定摘要，便于追踪生成依据。"""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -243,6 +304,26 @@ class ChapterContextService:
             if card_id:
                 lookup[card_id] = card
         return lookup
+
+    async def _load_power_system(self, novel_id: str) -> Optional[Dict[str, Any]]:
+        """读取已确认战力体系，未确认或加载失败时返回 None。"""
+        try:
+            return await power_system_repo.find_confirmed(novel_id)
+        except Exception:
+            logger.warning(
+                "加载战力体系失败，章节 AI 上下文将缺少战力体系", exc_info=True
+            )
+            return None
+
+    async def _load_blueprint(self, novel_id: str) -> Optional[Dict[str, Any]]:
+        """读取已确认创作蓝图，未确认或加载失败时返回 None。"""
+        try:
+            return await novel_blueprint_repo.find_confirmed(novel_id)
+        except Exception:
+            logger.warning(
+                "加载创作蓝图失败，章节 AI 上下文将缺少蓝图摘要", exc_info=True
+            )
+            return None
 
     async def build(
         self,
@@ -303,6 +384,9 @@ class ChapterContextService:
         previous_summary, recent_summaries, unresolved_threads = await self._load_chapter_history(
             novel_id, chapter
         )
+        # 增量新增：只注入已确认的战力体系与创作蓝图，未确认内容不进入上下文
+        power_system = await self._load_power_system(novel_id)
+        blueprint = await self._load_blueprint(novel_id)
 
         context = ChapterContext(
             novel=novel,
@@ -311,6 +395,8 @@ class ChapterContextService:
             linked_cards=linked_cards,
             core_cards=core_cards,
             hard_rules=hard_rules,
+            power_system=power_system,
+            blueprint=blueprint,
             previous_summary=previous_summary,
             recent_summaries=recent_summaries,
             unresolved_threads=unresolved_threads,
@@ -397,6 +483,12 @@ class ChapterContextService:
             f"本章摘要：{_clip(chapter.get('summary'), 600) or '未填写'}",
             f"本章蓝图：{_clip(json.dumps(chapter.get('blueprint_snapshot') or {}, ensure_ascii=False), 800) or '未填写'}",
         ]
+        if context.power_system:
+            blocks.extend(["", _render_power_system_block(context.power_system)])
+        if context.blueprint:
+            blueprint_block = _render_blueprint_block(context.blueprint)
+            if blueprint_block:
+                blocks.extend(["", blueprint_block])
         for card_type, section in CARD_PROMPT_SECTIONS.items():
             cards = [c for c in context.linked_cards if c.get("type") == card_type]
             if card_type == "rule":
@@ -437,7 +529,7 @@ class ChapterContextService:
         used_character_ids = {
             str(item.get("character_id")) for item in context.linked_characters
         }
-        return {
+        snapshot: Dict[str, Any] = {
             "novel_version": context.novel.get("version", 1),
             "chapter_version": context.chapter.get("version", 1),
             "characters": {
@@ -457,6 +549,19 @@ class ChapterContextService:
             },
             "context_hash": _compute_context_hash(context.text),
         }
+        if context.power_system:
+            snapshot["power_system"] = {
+                "power_system_id": str(
+                    context.power_system.get("power_system_id") or ""
+                ),
+                "version": context.power_system.get("version", 1),
+            }
+        if context.blueprint:
+            snapshot["blueprint"] = {
+                "blueprint_id": str(context.blueprint.get("blueprint_id") or ""),
+                "version": context.blueprint.get("version", 1),
+            }
+        return snapshot
 
 
 chapter_context_service = ChapterContextService()

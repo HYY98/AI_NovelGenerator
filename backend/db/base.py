@@ -77,6 +77,7 @@ class BaseRepository:
         query: Dict[str, Any],
         include_deleted: bool = False,
         session: AsyncClientSession | None = None,
+        sort=None,
     ) -> Optional[Dict[str, Any]]:
         """查找单条文档，默认不包含已软删除的记录。
 
@@ -84,6 +85,8 @@ class BaseRepository:
             query: MongoDB 查询条件。
             include_deleted: 是否包含软删除记录。
             session: 可选 MongoDB 会话，用于事务读取。
+            sort: 可选排序定义；存在多条候选时返回排序后的第一条
+                （例如按版本号倒序取最新已确认文档）。
 
         Returns:
             命中的单个文档，不存在时返回 None。
@@ -91,7 +94,12 @@ class BaseRepository:
         q = dict(query)
         if not include_deleted:
             q["is_deleted"] = False
-            
+
+        if sort:
+            cursor = self.collection.find(q, session=session).sort(sort).limit(1)
+            docs = await cursor.to_list(length=1)
+            return docs[0] if docs else None
+
         return await self.collection.find_one(q, session=session)
 
     async def find_many(

@@ -23,6 +23,7 @@ import {
   DEFAULT_GENERATION_PARAMS,
   type GenerationParamsValue,
 } from "@/components/shared/GenerationParamsCollapse";
+import { AIProgressBar } from "@/components/shared/AIProgressBar";
 import {
   ConfirmActionModal,
   focusRelationEditorError,
@@ -93,9 +94,14 @@ type CharacterRelationsPreviewRequest = Partial<GenerationParamsValue> & {
   user_guidance: string | null;
 };
 
+type CharacterGenerationProgress = {
+  characters: number;
+  chunkCount: number;
+};
+
 type CharacterGenerationState =
   | { status: "idle" }
-  | { status: "generating"; kind: GenerationKind }
+  | { status: "generating"; kind: GenerationKind; progress?: CharacterGenerationProgress }
   | {
       status: "preview";
       kind: "core_characters";
@@ -742,6 +748,17 @@ export default function CharacterCardsWorkspace({
           "/api/llm/generate-core-characters/stream",
           request,
           (event, data) => {
+            if (event === "progress") {
+              // 流式进度事件携带累计 chunk 数与字符数，用于驱动进度条
+              const characters = Number(data.characters ?? 0);
+              const chunkCount = Number(data.chunk_count ?? 0);
+              setGenerationState((prev) =>
+                prev.status === "generating"
+                  ? { ...prev, progress: { characters, chunkCount } }
+                  : prev,
+              );
+              return;
+            }
             if (event === "error") {
               throw new Error(String(data.error || data.message || t("errors.generateFailed")));
             }
@@ -817,6 +834,17 @@ export default function CharacterCardsWorkspace({
           "/api/llm/generate-character-relations/stream",
           request,
           (event, data) => {
+            if (event === "progress") {
+              // 与核心角色生成共用同一份进度状态，切换生成类型时会被重置
+              const characters = Number(data.characters ?? 0);
+              const chunkCount = Number(data.chunk_count ?? 0);
+              setGenerationState((prev) =>
+                prev.status === "generating"
+                  ? { ...prev, progress: { characters, chunkCount } }
+                  : prev,
+              );
+              return;
+            }
             if (event === "error") {
               throw new Error(String(data.error || data.message || t("errors.generateFailed")));
             }
@@ -1207,12 +1235,12 @@ export default function CharacterCardsWorkspace({
           role="status"
           aria-live="polite"
         >
-          <div className="flex min-w-0 items-start gap-3">
+          <div className="flex min-w-0 flex-1 items-start gap-3">
             <span
               className="mt-1 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-accent"
               aria-hidden="true"
             />
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-foreground">
                 {generationState.kind === "core_characters"
                   ? t("generation.generatingCharacters")
@@ -1221,6 +1249,16 @@ export default function CharacterCardsWorkspace({
               <p className="mt-1 text-xs leading-5 text-muted">
                 {t("generation.generatingHint")}
               </p>
+              <AIProgressBar
+                className="mt-2"
+                label={
+                  generationState.progress && generationState.progress.characters > 0
+                    ? t("generation.progressChars", {
+                        count: generationState.progress.characters,
+                      })
+                    : undefined
+                }
+              />
             </div>
           </div>
           <Button

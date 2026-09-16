@@ -171,7 +171,11 @@ class ChapterRepository(BaseRepository):
         return await self.soft_delete_one({"_id": ObjectId(chapter_id)}, session=session)
 
     async def restore_chapter(self, chapter_id, session=None):
-        ok = await self.restore_one({"_id": ObjectId(chapter_id)}, session=session)
+        try:
+            oid = ObjectId(chapter_id)
+        except Exception:
+            raise NotFoundError(f"章节ID无效: {chapter_id}")
+        ok = await self.restore_one({"_id": oid}, session=session)
         if not ok:
             raise NotFoundError(f"待恢复章节不存在: {chapter_id}")
         return await self.get_chapter(chapter_id, include_deleted=True, session=session)

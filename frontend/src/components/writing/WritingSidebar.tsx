@@ -93,6 +93,37 @@ const ENTITY_ITEMS: NavItem[] = [
   },
 ];
 
+/** 增量新增：创作设定与正文同步入口。 */
+const GENERATION_ITEMS: NavItem[] = [
+  {
+    key: "creation-blueprint",
+    labelKey: "sidebar.creationBlueprint",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+      </svg>
+    ),
+  },
+  {
+    key: "power-system",
+    labelKey: "sidebar.powerSystem",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+      </svg>
+    ),
+  },
+  {
+    key: "setting-sync",
+    labelKey: "sidebar.settingSync",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 16h5v5" />
+      </svg>
+    ),
+  },
+];
+
 export default function WritingSidebar({ activeItem, onSelect }: WritingSidebarProps) {
   const t = useTranslations("writing");
   const router = useRouter();
@@ -147,6 +178,18 @@ export default function WritingSidebar({ activeItem, onSelect }: WritingSidebarP
         </div>
 
         {ENTITY_ITEMS.map(renderItem)}
+
+        {/* Divider */}
+        <div className="my-3 hidden border-t border-dashed border-border md:block" />
+
+        {/* Generation group label */}
+        <div className="hidden px-3 py-1 md:block">
+          <span className="text-xs font-semibold text-muted uppercase tracking-wider">
+            {t("sidebar.generationGroup")}
+          </span>
+        </div>
+
+        {GENERATION_ITEMS.map(renderItem)}
       </nav>
     </aside>
   );

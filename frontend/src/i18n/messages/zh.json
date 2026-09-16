@@ -54,8 +54,8 @@
         "needsTest": "待测试"
       },
       "alias": "Provider 别名",
-      "aliasPlaceholder": "例如 openai_gpt4o",
-      "aliasRule": "仅允许字母、数字、下划线",
+      "aliasPlaceholder": "例如 teamo-gpt",
+      "aliasEmpty": "别名不能为空",
       "aliasDuplicate": "别名已存在",
       "renameProvider": "重命名",
       "renameTo": "新别名",
@@ -122,6 +122,7 @@
         "temperature": "采样温度 (Temperature)",
         "topP": "核采样 (Top P)",
         "maxTokens": "最大 Token 数",
+        "maxTokensHint": "过小会导致输出被截断（推理模型的思考 token 也计入上限），建议不小于 2048",
         "presencePenalty": "存在惩罚 (Presence Penalty)",
         "frequencyPenalty": "频率惩罚 (Frequency Penalty)",
         "systemPrompt": "系统提示词 (System Prompt)",
@@ -257,6 +258,15 @@
     "stepNovelMeta": "生成小说设定",
     "stepCached": "已缓存，可用于重试续跑",
     "stepComplete": "生成完成",
+    "generationModeLabel": "生成模式",
+    "blueprintStatus": "创作蓝图状态",
+    "openBlueprintWizard": "进入设定向导",
+    "editBlueprint": "修改创作蓝图",
+    "blueprintVersion": "蓝图版本",
+    "outlineStatus": "大纲确认状态",
+    "chapterStatus": "章节生成状态",
+    "statusNotGenerated": "待生成",
+    "blueprintRequiredHint": "设定模式需要先在向导中确认创作蓝图，再开始生成",
     "stepFailed": "生成失败",
     "retryStep": "重试",
     "reviewTitle": "AI 生成结果预览",
@@ -271,6 +281,7 @@
       "temperature": "采样温度 (Temperature)",
       "topP": "核采样 (Top P)",
       "maxTokens": "最大 Token 数",
+      "maxTokensHint": "过小会导致输出被截断（推理模型的思考 token 也计入上限），建议不小于 2048",
       "presencePenalty": "存在惩罚 (Presence Penalty)",
       "frequencyPenalty": "频率惩罚 (Frequency Penalty)",
       "systemPrompt": "系统提示词 (System Prompt)",
@@ -291,7 +302,11 @@
       "factionCards": "势力卡",
       "itemCards": "物品卡",
       "ruleCards": "设定规则卡",
-      "relationshipMap": "角色关系图"
+      "relationshipMap": "角色关系图",
+      "generationGroup": "创作与同步",
+      "creationBlueprint": "创作设定中心",
+      "powerSystem": "战力体系",
+      "settingSync": "正文同步中心"
     },
     "placeholder": {
       "title": "{module}",
@@ -746,6 +761,7 @@
         "generatingCharacters": "正在生成全书级核心角色",
         "generatingRelations": "正在生成人物关系网",
         "generatingHint": "生成请求正在处理中，完成后将自动进入候选确认页面。",
+        "progressChars": "已生成 {count} 字",
         "cancelGeneration": "取消生成"
       },
       "candidate": {

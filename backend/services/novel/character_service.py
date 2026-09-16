@@ -56,10 +56,17 @@ CHARACTER_CONTENT_FIELDS: tuple[str, ...] = (
     "tags",
     "sort_order",
     "extra",
+    # 战力体系绑定字段（模块3）
+    "power_system_id",
+    "power_level",
+    "power_abilities",
+    "power_limitations",
+    "power_version",
 )
 
+# power_version 由服务端在战力体系绑定变更时维护，不开放给客户端直接写
 CHARACTER_EDITABLE_FIELDS: tuple[str, ...] = tuple(
-    field for field in CHARACTER_CONTENT_FIELDS if field != "sort_order"
+    field for field in CHARACTER_CONTENT_FIELDS if field not in {"sort_order", "power_version"}
 )
 
 AI_CHARACTER_CONTENT_FIELDS: tuple[str, ...] = tuple(
@@ -72,7 +79,15 @@ _LIST_FIELDS: tuple[str, ...] = (
     "weaknesses",
     "abilities",
     "tags",
+    "power_abilities",
+    "power_limitations",
 )
+
+# 战力字段的类型化默认值：power_version 由服务端维护，不进入文本默认值
+_POWER_TEXT_DEFAULTS: dict[str, str] = {
+    "power_system_id": "",
+    "power_level": "",
+}
 
 _TEXT_DEFAULTS: dict[str, str] = {
     "role_type": "supporting",
@@ -795,11 +810,15 @@ def _build_character_document(
         document[field] = list(raw_value) if isinstance(raw_value, (list, tuple)) else []
     for field, default_value in _TEXT_DEFAULTS.items():
         document[field] = str(source.get(field, default_value) or default_value).strip()
+    for field, default_value in _POWER_TEXT_DEFAULTS.items():
+        document[field] = str(source.get(field, default_value) or default_value).strip()
 
     document.update(
         {
             "sort_order": max(0, int(sort_order)),
             "extra": dict(source.get("extra") or {}),
+            # 战力版本由服务端维护，绑定体系变更时自增，客户端不得直接写
+            "power_version": max(1, int(source.get("power_version") or 1)),
             "status": "active",
             "is_core_character": is_core_character,
             # 全书角色初始化早于结构规划，首次出场引用必须保持为空。

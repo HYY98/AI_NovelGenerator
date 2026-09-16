@@ -91,12 +91,25 @@ async def get_card(novel_id: str, card_id: str, include_deleted: bool = False):
 
 
 @router.put("/{novel_id}/{card_id}")
-async def update_card(novel_id: str, card_id: str, req: UpdateCardRequest, expected_version: Optional[int] = None):
+async def update_card(
+    novel_id: str,
+    card_id: str,
+    req: UpdateCardRequest,
+    expected_version: Optional[int] = None,
+    confirm_locked_fields: bool = False,
+):
+    """更新卡片；修改 name / current_state / is_hard_rule 需显式确认。"""
     try:
         data = req.model_dump(exclude_unset=True)
         if not data:
             raise HTTPException(400, "没有要更新的字段")
-        return await service.update_card(novel_id, card_id, data, expected_version)
+        return await service.update_card(
+            novel_id,
+            card_id,
+            data,
+            expected_version,
+            allow_protected_fields=confirm_locked_fields,
+        )
     except Exception as e:
         _handle(e)
 

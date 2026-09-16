@@ -67,6 +67,7 @@ export function OptionalNumberParam({
   min,
   max,
   step,
+  description,
 }: {
   label: string;
   value: number | null | undefined;
@@ -75,33 +76,37 @@ export function OptionalNumberParam({
   min: number;
   max: number;
   step: number;
+  description?: string;
 }) {
   const enabled = value != null;
   return (
-    <div className="flex items-center gap-4">
-      <Switch isSelected={enabled} onChange={(v) => onToggle(v)} className="shrink-0">
-        <Switch.Control>
-          <Switch.Thumb />
-        </Switch.Control>
-        <Switch.Content className="text-sm w-40">{label}</Switch.Content>
-      </Switch>
-      {enabled && (
-        <NumberField
-          aria-label={label}
-          value={value!}
-          onChange={(v) => onValueChange(Math.max(min, Math.min(max, v)))}
-          minValue={min}
-          maxValue={max}
-          step={step}
-          className="max-w-[180px]"
-        >
-          <NumberField.Group>
-            <NumberField.DecrementButton />
-            <NumberField.Input className="border-border" />
-            <NumberField.IncrementButton />
-          </NumberField.Group>
-        </NumberField>
-      )}
+    <div className="space-y-1">
+      <div className="flex items-center gap-4">
+        <Switch isSelected={enabled} onChange={(v) => onToggle(v)} className="shrink-0">
+          <Switch.Control>
+            <Switch.Thumb />
+          </Switch.Control>
+          <Switch.Content className="text-sm w-40">{label}</Switch.Content>
+        </Switch>
+        {enabled && (
+          <NumberField
+            aria-label={label}
+            value={value!}
+            onChange={(v) => onValueChange(Math.max(min, Math.min(max, v)))}
+            minValue={min}
+            maxValue={max}
+            step={step}
+            className="max-w-[180px]"
+          >
+            <NumberField.Group>
+              <NumberField.DecrementButton />
+              <NumberField.Input className="border-border" />
+              <NumberField.IncrementButton />
+            </NumberField.Group>
+          </NumberField>
+        )}
+      </div>
+      {description && <p className="text-xs leading-5 text-muted">{description}</p>}
     </div>
   );
 }

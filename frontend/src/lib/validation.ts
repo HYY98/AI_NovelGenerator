@@ -2,8 +2,6 @@ import type { AppConfig } from "@/types/config";
 
 type TFunc = (key: string) => string;
 
-const ALIAS_REGEX = /^[a-zA-Z0-9_]+$/;
-
 export function validateConfig(config: AppConfig, t: TFunc): string | null {
   // Database fields
   if (!config.mongodb_url?.trim()) {
@@ -29,10 +27,10 @@ export function validateConfig(config: AppConfig, t: TFunc): string | null {
     return t("validation.providerNotExist") + `: ${config.llm.format_review_provider}`;
   }
 
-  // Provider alias validation
+  // Provider alias validation：只看别名是否为空，不再限制字符集
   for (const alias of providerAliases) {
-    if (!ALIAS_REGEX.test(alias)) {
-      return t("provider.aliasRule") + `: ${alias}`;
+    if (!alias.trim()) {
+      return t("provider.aliasEmpty");
     }
     const p = config.llm.providers[alias];
     if (p.timeout_seconds < 0 || p.max_retries < 0 || p.max_concurrency < 0) {

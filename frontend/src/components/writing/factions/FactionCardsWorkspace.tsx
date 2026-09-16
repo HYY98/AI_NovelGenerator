@@ -1927,8 +1927,9 @@ function GenerateCoreFactionsModal({
   return (
       <Modal.Backdrop isOpen onOpenChange={(isOpen) => !isOpen && !generating && onCancel()} variant="blur" isDismissable={!generating}>
         <Modal.Container size="lg" scroll="inside" className="px-3 sm:px-6">
-          <Modal.Dialog className="w-full max-w-3xl">
-            <Modal.Header className="flex items-start justify-between gap-3 border-b border-border px-5 py-4 sm:px-6">
+          {/* 生成面板保持紧凑尺寸，避免在窄屏/小窗口下铺满整屏。 */}
+          <Modal.Dialog className="w-full max-w-2xl">
+            <Modal.Header className="flex items-start justify-between gap-3 border-b border-border px-5 py-3.5 sm:px-6">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.16em] text-accent">{t("generateDialog.eyebrow")}</p>
             <Modal.Heading className="mt-1 text-lg font-semibold text-foreground">{t("generateDialog.title")}</Modal.Heading>
@@ -1943,8 +1944,8 @@ function GenerateCoreFactionsModal({
           </div>
         )}
 
-        <Modal.Body className="space-y-6 px-5 py-6 sm:px-6">
-          <div className="grid gap-5 md:grid-cols-[minmax(180px,0.7fr)_minmax(0,1.3fr)]">
+        <Modal.Body className="space-y-4 px-5 py-5 sm:px-6">
+          <div className="grid gap-4 md:grid-cols-[minmax(180px,0.7fr)_minmax(0,1.3fr)]">
             <label className="grid gap-2 text-sm">
               <span className="text-xs font-semibold tracking-wide text-muted">{t("generateDialog.factionCount")}</span>
               <input
@@ -1989,14 +1990,14 @@ function GenerateCoreFactionsModal({
           <TextArea
             label={t("generateDialog.userGuidance")}
             value={options.userGuidance}
-            rows={5}
+            rows={3}
             placeholder={t("placeholders.userGuidance")}
             disabled={generating}
             onChange={(userGuidance) => onOptionsChange({ userGuidance })}
           />
 
           {options.factionCount === 1 && (
-            <div className="grid gap-5 border-t border-border pt-5">
+            <div className="grid gap-4 border-t border-border pt-4">
               <div className="grid gap-2 text-sm">
                 <span className="inline-flex items-center gap-1 text-xs font-medium text-muted">
                   {t("generateDialog.integrityScore", { score: options.singleFactionIntegrityScore })}
@@ -2118,7 +2119,7 @@ function GenerateCoreFactionsModal({
           />
         </Modal.Body>
 
-        <Modal.Footer className="flex justify-end gap-2 border-t border-border px-5 py-4 sm:px-6">
+        <Modal.Footer className="flex justify-end gap-2 border-t border-border px-5 py-3.5 sm:px-6">
           <Button variant="ghost" size="sm" onPress={onCancel} isDisabled={generating}>
             {t("cancel")}
           </Button>

@@ -22,6 +22,7 @@ import {
   rewriteChapterSelection,
 } from "@/lib/chapterAiApi";
 import { AIButton, AISection, AIWarnings, SeverityBadge } from "./AIShared";
+import ChapterSettingSyncPanel from "./ChapterSettingSyncPanel";
 
 /** 章节 AI 面板需要的最小章节信息。 */
 export interface ChapterAITarget {
@@ -97,6 +98,8 @@ export default function ChapterAIPanel({
   const [acceptedEvents, setAcceptedEvents] = useState<Record<string, boolean>>({});
   const [ignoredIssues, setIgnoredIssues] = useState<Record<string, boolean>>({});
   const [forceFinalize, setForceFinalize] = useState(false);
+  /** 增量新增：本章设定同步面板的展开状态。 */
+  const [showSettingSync, setShowSettingSync] = useState(false);
 
   const readOnly = chapter.status === "finalized" || !!chapter.is_deleted;
   const selectionText = selection?.text ?? "";
@@ -296,6 +299,10 @@ export default function ChapterAIPanel({
         ignored_issues: ignored,
         blocking_issues: blockingIssues,
         force: forceFinalize,
+        // 回传审校依据，服务端以保存的审校记录与硬规则签名重新校验
+        review_generation_id: finalizeData.review_generation_id,
+        hard_rule_signature: finalizeData.hard_rule_signature ?? "",
+        blueprint_version: finalizeData.blueprint_version ?? undefined,
       });
       setInfo(res.message);
       setFinalizeData(null);
@@ -372,7 +379,33 @@ export default function ChapterAIPanel({
           disabled={!!busy || readOnly}
           title="定稿会先审校并列出状态变更，确认后才落库"
         />
+        {novelId && (
+          <AIButton
+            label={showSettingSync ? "收起本章设定同步" : "本章设定同步"}
+            onClick={() => setShowSettingSync((prev) => !prev)}
+            disabled={!!busy}
+            title="分析本章正文与已确认设定的差异，逐条确认后写入"
+          />
+        )}
       </div>
+
+      {/* 增量新增：本章设定同步候选展示区，AI 结果只作候选，需逐条确认 */}
+      {showSettingSync && novelId && (
+        <AISection
+          title="本章设定同步"
+          hint="新卡片、字段补充、状态变化与正文修改建议都需要逐条确认"
+          actions={<AIButton label="收起" onClick={() => setShowSettingSync(false)} />}
+        >
+          <ChapterSettingSyncPanel
+            novelId={novelId}
+            chapterId={chapter._id}
+            chapterVersion={chapter.version}
+            content={chapter.content}
+            onApply={(nextContent) => onApply({ replaceAll: nextContent })}
+            onNotify={(message) => setInfo(message)}
+          />
+        </AISection>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <input
